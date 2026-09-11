@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    自适应图标前景层：柱状图 + 上升折线，对应「性能监视」语义。
+    图形取自 Material Symbols 的 monitoring 图标（Apache-2.0），重绘为
+    圆头线条以便在小尺寸下保持清晰。
+
+    24x24 的设计坐标经 group 缩放 2.5 倍并平移到 108dp 画布中央，
+    内容落在 24..84 区间内，处于自适应图标的安全区（中心 72dp）之中，
+    圆形 / 方形 / 水滴等各家蒙版裁切后都不会切到图形。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:scaleX="2.5"
+        android:scaleY="2.5"
+        android:translateX="24"
+        android:translateY="24">
+
+        <!-- 三根柱条，从左到右渐高 -->
+        <path
+            android:pathData="M5.5,20.5V16.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M12,20.5V13"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M18.5,20.5V10"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round" />
+
+        <!-- 上升折线，压在柱条上方 -->
+        <path
+            android:pathData="M4,11L9.5,6.5L14.5,9.5L20,3.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

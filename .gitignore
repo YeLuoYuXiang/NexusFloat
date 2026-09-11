@@ -1,0 +1,26 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+.kotlin
+
+# 签名相关：密钥库与口令一律不入库
+*.jks
+*.keystore
+keystore.properties
+
+# 本地快照目录（含密钥库与 APK）
+NexusFloat_v*/
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.dex
+output.json

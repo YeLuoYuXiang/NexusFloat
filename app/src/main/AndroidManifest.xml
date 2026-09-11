@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        列出已安装应用，供「仅在选定应用显示」的应用选择页使用。
+        Android 11 起应用默认只能看到自己，没有该权限时列表几乎是空的。
+        这是安装时授予的 normal 权限，不弹运行时弹窗；仅本地展示，不联网。
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!--
+        开机自启（v1.8.0）：重启后不等用户打开 App，模块进程即被拉起并开始
+        GPU 采集，SystemUI 的监视条立即可用。normal 权限，安装时授予。
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NexusFloat">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name=".service.EarlyInitProvider"
+            android:authorities="com.jj.nexusfloat.earlyinit"
+            android:directBootAware="true"
+            android:exported="true" />
+
+        <!--
+            开机自启（v1.8.0）。registered-only 的 receiver 拿不到 BOOT_COMPLETED
+            （进程死了没人收），必须 manifest 注册。exported=false 挡第三方伪造
+            广播——系统广播照常送达。
+            LOCKED_BOOT_COMPLETED 那条要求 receiver directBootAware，
+            这样 Direct Boot 阶段（未解锁）也能把进程先拉起来。
+        -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

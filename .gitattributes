@@ -1,0 +1,17 @@
+# 统一用 LF，避免 Windows / macOS / Linux 之间的换行差异
+* text=auto eol=lf
+
+# Windows 批处理脚本必须保留 CRLF，否则 cmd 解析会出错
+*.bat text eol=crlf
+
+# 二进制文件不做换行转换
+*.jar binary
+*.jks binary
+*.keystore binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.ttf binary
+
+# gradlew 需要可执行位
+gradlew text eol=lf

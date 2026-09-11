@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 13+ 主题化图标（themed icon）图层。
+    系统只取其 alpha 通道，再按用户壁纸取色重新着色，故这里必须画成
+    纯白单色实体，且不能依赖背景层——背景在主题化模式下被丢弃。
+
+    与前景层同样的图形，但线条略粗：主题化图标会被系统再缩小一档，
+    细线在部分启动器上会发虚。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:scaleX="2.5"
+        android:scaleY="2.5"
+        android:translateX="24"
+        android:translateY="24">
+
+        <path
+            android:pathData="M5.5,20.5V16.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M12,20.5V13"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M18.5,20.5V10"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3"
+            android:strokeLineCap="round" />
+
+        <path
+            android:pathData="M4,11L9.5,6.5L14.5,9.5L20,3.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

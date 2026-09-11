@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark Mode Color Palette -->
+    <color name="md_theme_primary">#6DB0FF</color>
+    <color name="md_theme_onPrimary">#002F6C</color>
+    <color name="md_theme_primaryContainer">#1E2838</color>
+    <color name="md_theme_onPrimaryContainer">#D4E3FF</color>
+
+    <color name="md_theme_surface">#0F1115</color>
+    <color name="card_surface">#1B1E26</color>
+    <color name="md_theme_onSurface">#F0F3F9</color>
+    <color name="md_theme_onSurfaceVariant">#9FA5B5</color>
+
+    <color name="status_connected">#34D399</color>
+    <color name="status_connected_bg">#133E2B</color>
+    <color name="status_disconnected">#F87171</color>
+    <color name="status_disconnected_bg">#4A1515</color>
+
+    <color name="card_stroke">#2B2F3D</color>
+</resources>

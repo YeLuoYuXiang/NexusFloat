@@ -22,11 +22,13 @@ public final class Constants {
         /**
          * 输出不输出调试日志（logcat 标签是 Constants.TAG，同时写进 LSPosed 模块日志）。
          *
-         * 发布版是 false；排查问题时改成 true 重新编译安装就行。
-         * v1.6.8~v1.6.11 的 debug 版开过它，用来查澎湃 OS 4 上监视器不显示、
-         * 设置不生效的问题，现在定位修好了，就关回去。
+         * v1.6.8~v1.6.11 的 debug 版开着它排查过澎湃 OS 4 的问题，之后关了回去。
+         *
+         * v1.8.11 重新打开：ColorOS 后台唤醒这条链路反复修不好，而日志关着的时候
+         * LSPosed 日志里连模块名都搜不到，用户和开发都拿不到现场数据，只能靠猜。
+         * 分辨率调大一点能接受，排查完再关。
          */
-        public static final boolean LOG_ENABLED = false;
+        public static final boolean LOG_ENABLED = true;
 
         /** 数据采集和 UI 刷新间隔（毫秒）的默认值 */
         public static final int UPDATE_INTERVAL_MS = 1000;
@@ -708,6 +710,26 @@ public final class Constants {
          * 只要模块装着就能用，跟注不注入没关系。
          */
         public static final String PATH_PREFS = "prefs";
+
+        /**
+         * 唤醒诊断记录的 query 路径（v1.8.11）。
+         * 唤醒由 SystemUI 侧发起、记录也在那边，App 查这条路径把文本拿回来显示。
+         */
+        public static final String PATH_WAKE_LOG = "wake_log";
+
+        /**
+         * 唤醒诊断的落盘路径（v1.8.11）。
+         *
+         * 记录产生在 SystemUI 进程，看的人在 App 界面，跨进程读不到静态变量，
+         * 所以 SystemUI 用 root 追加写这个文件，App 读自己私有目录下的同一份。
+         *
+         * 路径写死成 /data/data/<包名>/files/... 而不是运行时算：写侧是 SystemUI、
+         * 拿不到模块的 Context。模块装机路径固定就是这个，App 侧读的时候
+         * 用同一个串做校验即可。
+         */
+        public static final String WAKE_LOG_FILE = "wake_diag.txt";
+        public static final String WAKE_LOG_PATH =
+                "/data/data/" + Package.MODULE + "/files/" + WAKE_LOG_FILE;
 
         /**
          * 唤醒广播的 action 与接收者（v1.8.11 重写）。

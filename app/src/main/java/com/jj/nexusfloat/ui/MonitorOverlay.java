@@ -20,6 +20,7 @@ import com.jj.nexusfloat.bridge.SettingsChannel;
 import com.jj.nexusfloat.collector.ForegroundAppTracker;
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.service.CollectorSignal;
+import com.jj.nexusfloat.service.WakeLog;
 import com.jj.nexusfloat.ui.view.MonitorView;
 import com.jj.nexusfloat.utils.LogUtils;
 
@@ -69,6 +70,8 @@ public final class MonitorOverlay {
     private int signalTicks;
     /** 距上次后台唤醒过了多少轮（v1.8.11） */
     private int wakeElapsedTicks;
+    /** 上次唤醒时的 GPU 读数，用来在下一轮确认唤醒是否真的生效 */
+    private int lastGpuMhzAtWake = Constants.Config.UNPUBLISHED;
 
     private final Runnable watchRunnable = new Runnable() {
         @Override
@@ -226,9 +229,12 @@ public final class MonitorOverlay {
         // 得靠这里把它关掉。signalCollector 自己会去重。
         signalCollector(shouldShow);
 
-        // 后台唤醒：模块进程被 ROM 划卡清掉时，按用户设的间隔把它拉回来，
+        // 后台唤醒：模块进程被 ROM 清掉时，按用户设的间隔把它拉回来，
         // 否则 GPU 数据会一直停在进程被杀之前的值
         wakeModuleIfDue(shouldShow);
+
+        // 上一轮唤醒的效果确认，紧跟在唤醒之后，隔一轮看结果
+        confirmWakeEffect();
     }
 
     /**
@@ -296,11 +302,38 @@ public final class MonitorOverlay {
             return;
         }
         wakeElapsedTicks = 0;
+        // 记下唤醒前的 GPU 读数，下一轮拿来对比，判断唤醒到底有没有效果。
+        // 只看「命令有没有报错」不够——命令成功但进程起来后没采集，GPU 照样是旧的
+        int beforeMhz = NexusBridge.getGpuFreqMhz();
+        WakeLog.add("发起唤醒（当前 GPU=" + (beforeMhz > 0 ? beforeMhz + "MHz" : "无数据") + "）");
         // 主路：root 起 Service，能穿透 stopped 状态
         CollectorSignal.wakeByRoot();
         // 兜底两条，成本都很低：万一没有 root，或者某 ROM 把 am 也限制住了
         CollectorSignal.wakeByBroadcast(context);
         CollectorSignal.send(context, true);
+        lastGpuMhzAtWake = beforeMhz;
+    }
+
+    /**
+     * 唤醒后的效果确认（v1.8.11）。
+     *
+     * 上一轮发过唤醒的话，这里比一次 GPU 读数：变了说明确实救回来了，
+     * 没变说明命令即使报成功、进程也没真正开始采集。这一步是给排查用的——
+     * ColorOS 上这条链路反复出问题，光看命令回显判断不了成败。
+     */
+    private void confirmWakeEffect() {
+        if (lastGpuMhzAtWake == Constants.Config.UNPUBLISHED) {
+            return;
+        }
+        int nowMhz = NexusBridge.getGpuFreqMhz();
+        if (nowMhz > 0 && nowMhz != lastGpuMhzAtWake) {
+            WakeLog.add("唤醒有效：GPU 已更新为 " + nowMhz + "MHz");
+        } else if (nowMhz > 0) {
+            WakeLog.add("GPU 仍是 " + nowMhz + "MHz（可能与负载不变有关，未确认失败）");
+        } else {
+            WakeLog.add("唤醒无效：GPU 依然没有数据");
+        }
+        lastGpuMhzAtWake = Constants.Config.UNPUBLISHED;
     }
 
     /**

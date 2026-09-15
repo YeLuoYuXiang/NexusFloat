@@ -104,21 +104,50 @@ public final class CollectorSignal {
         try {
             List<String> out = RootShell.get().execLines(startService, 8,
                     Constants.Config.EXEC_WAKE_TIMEOUT_MS);
+            WakeLog.add("start-service → " + describe(out));
             if (out != null && !looksLikeError(out)) {
                 LogUtils.i("wake by root: start-service ok");
                 return;
             }
             LogUtils.w("start-service failed, trying broadcast");
-            out = RootShell.get().execLines(sendBroadcast, 8,
+            List<String> out2 = RootShell.get().execLines(sendBroadcast, 8,
                     Constants.Config.EXEC_WAKE_TIMEOUT_MS);
-            if (out != null && !looksLikeError(out)) {
+            WakeLog.add("broadcast → " + describe(out2));
+            if (out2 != null && !looksLikeError(out2)) {
                 LogUtils.i("wake by root: broadcast ok");
                 return;
             }
+            WakeLog.add("两条 root 命令都没成功");
             LogUtils.w("wake by root: both commands failed");
         } catch (Throwable t) {
+            WakeLog.add("root 命令异常: " + t.getClass().getSimpleName()
+                    + ": " + t.getMessage());
             LogUtils.w("wake by root failed", t);
         }
+    }
+
+    /**
+     * 把 am 的输出压成一行短描述，供 App 界面显示。
+     * am 成功时一般没有输出（或只有一两条提示），失败时会打 Error 那几行。
+     */
+    private static String describe(List<String> lines) {
+        if (lines == null) {
+            return "没有输出（su 不可用或命令超时）";
+        }
+        if (lines.isEmpty()) {
+            return "无输出（通常表示执行成功）";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lines.size() && i < 3; i++) {
+            if (i > 0) {
+                sb.append(" / ");
+            }
+            sb.append(lines.get(i).trim());
+        }
+        if (lines.size() > 3) {
+            sb.append(" …");
+        }
+        return sb.toString();
     }
 
     /**

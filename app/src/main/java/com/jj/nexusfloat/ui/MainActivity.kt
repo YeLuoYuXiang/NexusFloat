@@ -84,6 +84,8 @@ class MainActivity : ComponentActivity() {
      * ColorOS 划卡清掉模块进程后，靠这个定时把进程拉回来，GPU 数据才不会断。
      */
     private var wakeIntervalSec by mutableStateOf(Constants.Modules.WAKE_INTERVAL_DEFAULT_SEC)
+    /** 唤醒诊断文本（v1.8.11），点「查看」时从 SystemUI 侧拉一次 */
+    private var wakeDiagText by mutableStateOf("")
     /** 各指标模块开关，下标对应 Constants.Modules.KEYS */
     private val moduleFlags = mutableStateListOf(
         *Array(Constants.Modules.COUNT) { true }
@@ -309,6 +311,8 @@ class MainActivity : ComponentActivity() {
                             },
                             wakeIntervalSec = wakeIntervalSec,
                             onWakeIntervalChange = { delta -> changeWakeInterval(delta) },
+                            wakeDiagText = wakeDiagText,
+                            onWakeDiag = { refreshWakeDiag() },
                             moduleFlags = moduleFlags,
                             onModuleChange = { index, checked ->
                                 moduleFlags[index] = checked
@@ -918,6 +922,29 @@ class MainActivity : ComponentActivity() {
         String.format(java.util.Locale.US, "%.1f", ms / 1000f)
 
     /**
+     * 读一次唤醒诊断（v1.8.11）。
+     *
+     * 记录由 SystemUI 侧用 root 追加写到本应用的 files 目录，这里直接读那个文件。
+     * 不走跨进程调用：唤醒是 SystemUI 发起的，它的内存记录 App 读不到，
+     * 落盘再读是最简单也最不容易出错的方式。
+     */
+    private fun refreshWakeDiag() {
+        try {
+            val file = File(filesDir, Constants.Component.WAKE_LOG_FILE)
+            wakeDiagText = if (!file.exists()) {
+                "还没有唤醒记录。\n" +
+                        "等一轮唤醒间隔之后再看；如果一直没有记录，说明监视条那边" +
+                        "没触发唤醒（检查「后台唤醒」是不是设成了 0）。"
+            } else {
+                val text = file.readText()
+                if (text.isBlank()) "记录文件是空的，唤醒可能没真正执行。" else text
+            }
+        } catch (t: Throwable) {
+            wakeDiagText = "读取失败: " + t.javaClass.simpleName + ": " + t.message
+        }
+    }
+
+    /**
      * 调后台唤醒间隔（v1.8.11），单位秒，0 表示关闭。
      *
      * 到边界就不再变，并给个提示——这个值范围比较宽（0–300），
@@ -1073,6 +1100,8 @@ fun MainScreen(
     onShowScreenOffChange: (Boolean) -> Unit,
     wakeIntervalSec: Int,
     onWakeIntervalChange: (Int) -> Unit,
+    wakeDiagText: String,
+    onWakeDiag: () -> Unit,
     moduleFlags: List<Boolean>,
     onModuleChange: (Int, Boolean) -> Unit,
     moduleNames: List<String>,
@@ -1170,6 +1199,8 @@ fun MainScreen(
                         onShowScreenOffChange = onShowScreenOffChange,
                         wakeIntervalSec = wakeIntervalSec,
                         onWakeIntervalChange = onWakeIntervalChange,
+                        wakeDiagText = wakeDiagText,
+                        onWakeDiag = onWakeDiag,
                         appFilterEnabled = appFilterEnabled,
                         onAppFilterChange = onAppFilterChange,
                         selectedAppCount = selectedAppCount,
@@ -1618,6 +1649,8 @@ fun DisplayCard(
     onShowScreenOffChange: (Boolean) -> Unit,
     wakeIntervalSec: Int,
     onWakeIntervalChange: (Int) -> Unit,
+    wakeDiagText: String,
+    onWakeDiag: () -> Unit,
     appFilterEnabled: Boolean,
     onAppFilterChange: (Boolean) -> Unit,
     selectedAppCount: Int,
@@ -1701,6 +1734,39 @@ fun DisplayCard(
                     "拉起来（后台启动，不会弹界面）；默认 15 秒，" +
                     "范围 0–${Constants.Modules.WAKE_INTERVAL_MAX_SEC} 秒，0 为关闭"
         )
+
+        // 唤醒诊断（v1.8.11）：把每轮唤醒的命令回显与效果都显示出来。
+        // 这条链路在 ColorOS 上反复出问题，只靠"有没有报错"判断不了成败，
+        // 所以把过程摊开给用户看，出问题时直接截图就是现场数据。
+        // 内容由 SystemUI 侧写入，按刷新按钮时读一次
+        Spacer(modifier = Modifier.height(8.dp))
+        ActionRow(
+            label = "唤醒诊断",
+            description = "查看后台唤醒每一步的执行结果，GPU 仍不刷新时点这里看原因",
+            buttonText = "查看",
+            onClick = onWakeDiag
+        )
+        if (wakeDiagText.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(ToggleOffContainer)
+                    .border(1.dp, CardStroke, RoundedCornerShape(12.dp))
+                    .padding(10.dp)
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = wakeDiagText,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MdThemeOnSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }
 

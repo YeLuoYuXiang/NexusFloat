@@ -264,15 +264,20 @@ public final class MonitorOverlay {
     /**
      * 定时把模块进程拉起来（v1.8.11）。
      *
-     * 为什么单开一条：ColorOS 这类 ROM 划掉后台卡片后会把模块进程整个清掉，
-     * 而 GPU 数据必须由模块进程用 root 读出来再回传。原来只靠 signalCollector
-     * 的心跳（每 30 轮一次），划卡后常要等半分钟以上 GPU 才恢复，有时干脆拉不动。
+     * 为什么需要：GPU 数据必须由模块 App 进程用 root 读出来再回传，进程没了数据就停更。
+     * 而 ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态（等同 adb
+     * am force-stop），这种状态下 ContentProvider query 会被系统直接拒绝，进程拉不起来。
+     * 划卡只是普通杀进程、不置 stopped，所以划卡是好的——这个 bug 只在全部清除后出现。
      *
-     * 这里按用户设的间隔主动 query 一次 EarlyInitProvider。query 是 binder 调用，
-     * 目标进程不在时系统会把它拉起来，正好当成唤醒手段用。
+     * 两条路一起发，谁通算谁：
+     * 一是显式广播，带 FLAG_INCLUDE_STOPPED_PACKAGES。这是系统对 stopped 应用唯一
+     * 放行的口子，由发送方加 flag，而我们就是发送方（SystemUI 已被注入，代码自己写），
+     * 所以不用 hook 系统框架也不需要 system 作用域。
+     * 二是原来的 Provider query，它虽然过不了 stopped 那道坎，但在没被置 stopped、
+     * 只是进程被普通回收的情况下依然有效，而且成本很低。
      *
-     * 间隔为 0 表示关闭，此时不做任何事，行为跟旧版一样。
-     * 只在监视条需要显示时才唤醒：隐藏时唤起来也没人看，白耗电。
+     * 间隔由用户设，0 表示关闭（行为跟旧版一致）。只在监视条需要显示时才唤醒，
+     * 隐藏时唤起来也没人看，白耗电。
      */
     private void wakeModuleIfDue(boolean showing) {
         if (!showing) {
@@ -291,7 +296,9 @@ public final class MonitorOverlay {
             return;
         }
         wakeElapsedTicks = 0;
-        // 复用采集指令通道：resume 本身就会唤醒模块进程并把采集打开
+        // 广播优先：它能穿透 stopped 状态。Provider query 作补充，
+        // 覆盖「进程只是被普通回收」的情况
+        CollectorSignal.wakeByBroadcast(context);
         CollectorSignal.send(context, true);
     }
 

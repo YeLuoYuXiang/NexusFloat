@@ -1697,9 +1697,9 @@ fun DisplayCard(
             value = if (wakeIntervalSec <= 0) "关闭" else "$wakeIntervalSec 秒",
             onDecrease = { onWakeIntervalChange(-Constants.Modules.WAKE_INTERVAL_STEP_SEC) },
             onIncrease = { onWakeIntervalChange(Constants.Modules.WAKE_INTERVAL_STEP_SEC) },
-            description = "划掉后台后 GPU 数据不刷新时调到 10–30 秒；" +
-                    "范围 0–${Constants.Modules.WAKE_INTERVAL_MAX_SEC} 秒，0 为关闭。" +
-                    "间隔越小越不容易断，也越费电"
+            description = "ColorOS 全部清除后台后 GPU 数据会停更，靠这个定时把进程唤醒；" +
+                    "默认 15 秒，范围 0–${Constants.Modules.WAKE_INTERVAL_MAX_SEC} 秒，" +
+                    "0 为关闭。间隔越小越不容易断，也越费电"
         )
     }
 }
@@ -2617,9 +2617,11 @@ private data class ChangelogEntry(val version: String, val summary: String)
 private val CHANGELOG = listOf(
     ChangelogEntry(
         "1.8.11",
-        "新增「后台唤醒」定时（显示时机页最后一项，0–300 秒可调）：ColorOS 这类" +
-                "ROM 划掉后台卡片会清掉模块进程，GPU 数据随之停更，设成 10–30 秒" +
-                "即可自动把进程拉回来；默认开启的项目精简为 CPU、GPU、功率、FPS 四项。"
+        "修复 ColorOS「全部清除后台」后 GPU 数据停更：改用带 " +
+                "FLAG_INCLUDE_STOPPED_PACKAGES 的显式广播唤醒模块进程" +
+                "（原来走 ContentProvider，被 stopped 状态直接拒绝，所以划卡正常、" +
+                "全部清除就失效）；「显示时机」新增「后台唤醒」定时，0–300 秒可调，" +
+                "默认 15 秒；默认开启的项目精简为 CPU、GPU、功率、FPS 四项。"
     ),
     ChangelogEntry(
         "1.8.10",

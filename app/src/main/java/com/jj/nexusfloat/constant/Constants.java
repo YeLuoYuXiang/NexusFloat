@@ -352,12 +352,14 @@ public final class Constants {
         /**
          * 后台唤醒间隔（秒），v1.8.11 新增。
          *
-         * ColorOS 这类 ROM 划掉后台卡片后会把模块进程彻底清掉，而 GPU 数据要由
-         * 模块进程用 root 读出来再回传。原来只靠监视条心跳（30 秒一次）把进程拉回来，
-         * 划卡后往往要等半分钟以上 GPU 才恢复刷新，实测有时干脆拉不起来。
+         * ColorOS 在最近任务里「全部清除」会把模块进程置为 stopped 状态，
+         * 而 GPU 数据要由那个进程用 root 读出来再回传，进程起不来数据就停更。
+         * 这里让 SystemUI 按间隔主动用广播把进程唤起来（广播带
+         * FLAG_INCLUDE_STOPPED_PACKAGES，能穿透 stopped 状态）。
          *
-         * 这个值由用户自己定：SystemUI 每隔这么久主动 query 一次 EarlyInitProvider，
-         * 把模块进程唤起来。0 表示关闭（只保留原心跳）。
+         * 默认 15 秒：这个值是修 bug 的主力手段，默认关掉等于没修。
+         * 15 秒是折中——比原来 30 秒的心跳快一倍，又不会明显增加耗电。
+         * 设 0 可以关掉（只保留原来的心跳）。
          */
         public static final String KEY_WAKE_INTERVAL = "wake_interval_sec";
         public static final String LABEL_WAKE_INTERVAL = "后台唤醒";
@@ -365,8 +367,7 @@ public final class Constants {
         public static final int WAKE_INTERVAL_MIN_SEC = 0;
         public static final int WAKE_INTERVAL_MAX_SEC = 300;
         public static final int WAKE_INTERVAL_STEP_SEC = 5;
-        /** 默认关闭：不额外拉起进程，行为与 v1.8.10 一致 */
-        public static final int WAKE_INTERVAL_DEFAULT_SEC = 0;
+        public static final int WAKE_INTERVAL_DEFAULT_SEC = 15;
 
         /**
          * 监视条整体位置微调（像素偏移）。
@@ -699,6 +700,30 @@ public final class Constants {
          * 只要模块装着就能用，跟注不注入没关系。
          */
         public static final String PATH_PREFS = "prefs";
+
+        /**
+         * 唤醒广播的 action 与接收者（v1.8.11 重写）。
+         *
+         * 背景：ColorOS 在「最近任务」里点全部清除，会把应用置为 Android 的
+         * stopped 状态（等同于 adb am force-stop，包被标记 stopped=true）。
+         * 这个状态下系统拒绝一切隐式唤醒手段，也包括我们原来用的
+         * ContentProvider query——进程根本拉不起来，GPU 数据就一直停更。
+         * 划卡只是普通杀进程，不置 stopped，所以划卡时是好的，
+         * 这也是这个 bug 只在 ColorOS 全部清除后出现的原因。
+         *
+         * 系统对 stopped 应用放行的条件只有一个：Intent 带
+         * FLAG_INCLUDE_STOPPED_PACKAGES。而这个 flag 由发送方加，
+         * 我们的发送方正是被注入了的 SystemUI 进程，能自己控制它。
+         * 所以用显式广播唤醒，不依赖任何系统侧 hook。
+         *
+         * 接收者必须 exported：LSPosed 只给模块注入了 com.android.systemui，
+         * 模块进程不在被注入清单里，这里走的是普通 Android 组件通信。
+         * action 带包名前缀，别的应用即使知道也只会打到我们自己包里。
+         */
+        public static final String ACTION_WAKE =
+                Package.MODULE + ".action.WAKE_COLLECTOR";
+        public static final String RECEIVER_WAKE =
+                Package.MODULE + ".service.WakeReceiver";
         /** 快照 Cursor 的列名：键、类型、值 */
         public static final String COL_KEY = "k";
         public static final String COL_TYPE = "t";

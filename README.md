@@ -142,10 +142,14 @@ SystemUI 里 su 不可靠（SELinux 对 system_server 类进程管得严），�
 普通 App 进程里做。1.8.6 起 SystemUI 侧也会先自己试一次 root 直读，读不到才等
 App 进程传，这样重启后 App 进程没起来时 GPU 数据也不会断。
 
-ColorOS 这类 ROM 划掉后台卡片后会把模块进程直接清掉，GPU 数据就跟着停更。
-「显示时机」里有个「后台唤醒」，填个 10–30 秒，SystemUI 就会按这个间隔主动
-把模块进程唤起来（走 ContentProvider 的 query，目标进程不在时系统会拉起它）。
-默认关闭，因为唤醒本身有开销。
+ColorOS 在最近任务里点「全部清除」会把模块进程置为 stopped 状态（等同
+`am force-stop`），这种状态下系统拒绝 ContentProvider query 之类的隐式唤醒，
+GPU 数据会一直停更；划卡只是普通杀进程，不置 stopped，所以划卡没事。
+
+「显示时机」里的「后台唤醒」就是修这个的：SystemUI 按设定间隔（默认 15 秒）
+发一条带 `FLAG_INCLUDE_STOPPED_PACKAGES` 的显式广播。这是系统对 stopped 应用
+唯一放行的口子，flag 由发送方加，而发送方就是被注入的 SystemUI 进程，
+所以不用 hook 系统框架、也不用把模块作用域扩到 system。设 0 可关闭。
 
 ### 3. 设置怎么同步
 

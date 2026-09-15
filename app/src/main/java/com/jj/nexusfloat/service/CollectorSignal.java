@@ -1,6 +1,7 @@
 package com.jj.nexusfloat.service;
 
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 
@@ -70,6 +71,37 @@ public final class CollectorSignal {
             }
         } catch (Throwable t) {
             LogUtils.w("CollectorSignal send failed: " + path, t);
+        }
+    }
+
+    /**
+     * 用广播把模块进程唤醒（v1.8.11）。
+     *
+     * 为什么不能只用上面的 Provider query：ColorOS 在最近任务里「全部清除」之后
+     * 会把应用置为 stopped 状态，这种状态下系统拒绝一切需要拉起进程的隐式手段，
+     * ContentProvider query 也在其中，于是进程永远起不来，GPU 数据停更。
+     * 划卡只是普通杀进程、不置 stopped，所以划卡时是好的——这就是这个 bug
+     * 只在「全部清除」后出现的原因。
+     *
+     * 系统对 stopped 应用唯一放行的条件是 Intent 带 FLAG_INCLUDE_STOPPED_PACKAGES。
+     * 这个 flag 由发送方加，而我们的发送方是被注入过的 SystemUI 进程（代码是我们写的），
+     * 所以不需要 hook 系统框架，也不用把模块作用域扩到 system。
+     *
+     * 显式广播（setPackage 指定收件包）+ 带上那个 flag，两个都是必需的：
+     * 前者保证只有我们自己的接收者收到，后者才能穿透 stopped 状态。
+     */
+    public static void wakeByBroadcast(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            Intent intent = new Intent(Constants.Component.ACTION_WAKE);
+            intent.setPackage(Constants.Package.MODULE);
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            context.sendBroadcast(intent);
+            LogUtils.i("CollectorSignal: wake broadcast sent");
+        } catch (Throwable t) {
+            LogUtils.w("CollectorSignal wake broadcast failed", t);
         }
     }
 }

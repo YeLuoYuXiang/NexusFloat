@@ -79,6 +79,11 @@ class MainActivity : ComponentActivity() {
     private var showLandscape by mutableStateOf(true)
     /** 息屏时还显不显示监视条（v1.8.10），默认不显示 */
     private var showScreenOff by mutableStateOf(false)
+    /**
+     * 后台唤醒间隔（秒，v1.8.11）：0 表示关闭。
+     * ColorOS 划卡清掉模块进程后，靠这个定时把进程拉回来，GPU 数据才不会断。
+     */
+    private var wakeIntervalSec by mutableStateOf(Constants.Modules.WAKE_INTERVAL_DEFAULT_SEC)
     /** 各指标模块开关，下标对应 Constants.Modules.KEYS */
     private val moduleFlags = mutableStateListOf(
         *Array(Constants.Modules.COUNT) { true }
@@ -179,8 +184,18 @@ class MainActivity : ComponentActivity() {
         showPortrait = readSwitch(Constants.Remote.KEY_SHOW_PORTRAIT)
         showLandscape = readSwitch(Constants.Remote.KEY_SHOW_LANDSCAPE)
         showScreenOff = readSwitch(Constants.Remote.KEY_SHOW_SCREEN_OFF, default = false)
+        wakeIntervalSec = readInt(
+            Constants.Modules.KEY_WAKE_INTERVAL,
+            Constants.Modules.WAKE_INTERVAL_DEFAULT_SEC
+        )
         for (i in 0 until Constants.Modules.COUNT) {
-            moduleFlags[i] = readSwitch(Constants.Modules.KEYS[i])
+            // 默认值取 DEFAULT_ENABLED（v1.8.11 起只默认开 CPU/GPU/功率/FPS），
+            // 与 NexusBridge.readModuleFlags 保持一致，否则界面显示的开关状态
+            // 会和监视条实际显示的项目对不上
+            moduleFlags[i] = readSwitch(
+                Constants.Modules.KEYS[i],
+                default = Constants.Modules.DEFAULT_ENABLED[i]
+            )
             moduleNames[i] = readString(
                 Constants.Modules.nameKey(i),
                 Constants.Modules.DEFAULT_NAMES[i]
@@ -292,6 +307,8 @@ class MainActivity : ComponentActivity() {
                                     Toast.LENGTH_SHORT
                                 ).show()
                             },
+                            wakeIntervalSec = wakeIntervalSec,
+                            onWakeIntervalChange = { delta -> changeWakeInterval(delta) },
                             moduleFlags = moduleFlags,
                             onModuleChange = { index, checked ->
                                 moduleFlags[index] = checked
@@ -901,6 +918,29 @@ class MainActivity : ComponentActivity() {
         String.format(java.util.Locale.US, "%.1f", ms / 1000f)
 
     /**
+     * 调后台唤醒间隔（v1.8.11），单位秒，0 表示关闭。
+     *
+     * 到边界就不再变，并给个提示——这个值范围比较宽（0–300），
+     * 用户长按加号时不容易察觉已经到顶了。
+     */
+    private fun changeWakeInterval(delta: Int) {
+        val target = (wakeIntervalSec + delta).coerceIn(
+            Constants.Modules.WAKE_INTERVAL_MIN_SEC,
+            Constants.Modules.WAKE_INTERVAL_MAX_SEC
+        )
+        if (target == wakeIntervalSec) {
+            Toast.makeText(
+                this@MainActivity,
+                if (delta > 0) "已是最大间隔" else "已是最小间隔",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        wakeIntervalSec = target
+        saveInt(Constants.Modules.KEY_WAKE_INTERVAL, target)
+    }
+
+    /**
      * 载入各 FPS 来源开关。
      *
      * 首次运行（还没有迁移标记）时，按旧版那个 fps_source 整数推导出等价的开关组合
@@ -1031,6 +1071,8 @@ fun MainScreen(
     onShowLandscapeChange: (Boolean) -> Unit,
     showScreenOff: Boolean,
     onShowScreenOffChange: (Boolean) -> Unit,
+    wakeIntervalSec: Int,
+    onWakeIntervalChange: (Int) -> Unit,
     moduleFlags: List<Boolean>,
     onModuleChange: (Int, Boolean) -> Unit,
     moduleNames: List<String>,
@@ -1126,6 +1168,8 @@ fun MainScreen(
                         onShowLandscapeChange = onShowLandscapeChange,
                         showScreenOff = showScreenOff,
                         onShowScreenOffChange = onShowScreenOffChange,
+                        wakeIntervalSec = wakeIntervalSec,
+                        onWakeIntervalChange = onWakeIntervalChange,
                         appFilterEnabled = appFilterEnabled,
                         onAppFilterChange = onAppFilterChange,
                         selectedAppCount = selectedAppCount,
@@ -1572,6 +1616,8 @@ fun DisplayCard(
     onShowLandscapeChange: (Boolean) -> Unit,
     showScreenOff: Boolean,
     onShowScreenOffChange: (Boolean) -> Unit,
+    wakeIntervalSec: Int,
+    onWakeIntervalChange: (Int) -> Unit,
     appFilterEnabled: Boolean,
     onAppFilterChange: (Boolean) -> Unit,
     selectedAppCount: Int,
@@ -1639,6 +1685,21 @@ fun DisplayCard(
                     Constants.Config.UPDATE_INTERVAL_MIN_MS / 1000f,
                     Constants.Config.UPDATE_INTERVAL_MAX_MS / 1000f
                 ) + "低于 0.7 秒时帧率仍按 0.7 秒统计，不会更快"
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 后台唤醒（v1.8.11）：ColorOS 这类 ROM 划掉后台卡片会把模块进程清掉，
+        // GPU 数据必须由那个进程用 root 读，进程没了数据就停更。
+        // 这里让 SystemUI 按设定的间隔主动把模块进程唤起来
+        StepperRow(
+            label = Constants.Modules.LABEL_WAKE_INTERVAL,
+            value = if (wakeIntervalSec <= 0) "关闭" else "$wakeIntervalSec 秒",
+            onDecrease = { onWakeIntervalChange(-Constants.Modules.WAKE_INTERVAL_STEP_SEC) },
+            onIncrease = { onWakeIntervalChange(Constants.Modules.WAKE_INTERVAL_STEP_SEC) },
+            description = "划掉后台后 GPU 数据不刷新时调到 10–30 秒；" +
+                    "范围 0–${Constants.Modules.WAKE_INTERVAL_MAX_SEC} 秒，0 为关闭。" +
+                    "间隔越小越不容易断，也越费电"
         )
     }
 }
@@ -2554,6 +2615,12 @@ private data class ChangelogEntry(val version: String, val summary: String)
  * shell 内建 read）只在能被观察到时才写进来，那一条的观察点是耗电。
  */
 private val CHANGELOG = listOf(
+    ChangelogEntry(
+        "1.8.11",
+        "新增「后台唤醒」定时（显示时机页最后一项，0–300 秒可调）：ColorOS 这类" +
+                "ROM 划掉后台卡片会清掉模块进程，GPU 数据随之停更，设成 10–30 秒" +
+                "即可自动把进程拉回来；默认开启的项目精简为 CPU、GPU、功率、FPS 四项。"
+    ),
     ChangelogEntry(
         "1.8.10",
         "修复 GPU 占用 100% 时百分号消失（列宽改回 4 字符，8%→10% 仍不跳动）；" +

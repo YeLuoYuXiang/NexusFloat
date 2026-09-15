@@ -151,12 +151,15 @@ public final class NexusBridge {
 
     /**
      * 读各指标模块的开关，下标跟 Constants.Modules.KEYS 对应。
-     * 读不到时全部当开启。
+     *
+     * v1.8.11 起默认值不再是「全开」，而是 DEFAULT_ENABLED 那张表
+     * （CPU、GPU、功率、FPS 四项）。用户改过的项以存下来的为准。
      */
     public static boolean[] readModuleFlags() {
         boolean[] flags = new boolean[Constants.Modules.COUNT];
         for (int i = 0; i < flags.length; i++) {
-            flags[i] = readBool(Constants.Modules.KEYS[i], true);
+            flags[i] = readBool(Constants.Modules.KEYS[i],
+                    Constants.Modules.DEFAULT_ENABLED[i]);
         }
         return flags;
     }
@@ -335,6 +338,17 @@ public final class NexusBridge {
                 Constants.Config.UPDATE_INTERVAL_MS);
         return Math.max(Constants.Config.UPDATE_INTERVAL_MIN_MS,
                 Math.min(Constants.Config.UPDATE_INTERVAL_MAX_MS, ms));
+    }
+
+    /**
+     * 后台唤醒间隔（秒，v1.8.11）；0 表示不额外唤醒。
+     * 越界一样是截断，理由同刷新时间。
+     */
+    public static int getWakeIntervalSec() {
+        int sec = readInt(Constants.Modules.KEY_WAKE_INTERVAL,
+                Constants.Modules.WAKE_INTERVAL_DEFAULT_SEC);
+        return Math.max(Constants.Modules.WAKE_INTERVAL_MIN_SEC,
+                Math.min(Constants.Modules.WAKE_INTERVAL_MAX_SEC, sec));
     }
 
     /** 监视条水平偏移（px，正值往右）；读不到是 0 */

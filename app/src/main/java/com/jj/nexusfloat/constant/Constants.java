@@ -218,6 +218,31 @@ public final class Constants {
         public static final int COUNT = KEYS.length;
 
         /**
+         * 各模块的默认开关状态，下标跟 KEYS 对应（v1.8.11）。
+         *
+         * 默认只开 CPU、GPU、功率、FPS 四项——这是最常看的组合，初次装上
+         * 监视条不至于长到占满半个状态栏。其余项目在「项目」页里按需打开。
+         *
+         * CPU频率 / GPU频率 是子项：父项默认开着、子项默认关，也就是默认只显示
+         * 占用率，不显示括号里的频率。
+         */
+        public static final boolean[] DEFAULT_ENABLED = {
+                false,  // mod_clock        时间
+                true,   // mod_clock_24h    24 小时制（时间关着时它也无所谓）
+                true,   // mod_cpu          CPU
+                false,  // mod_cpu_freq     CPU频率
+                true,   // mod_gpu          GPU
+                false,  // mod_gpu_freq     GPU频率
+                false,  // mod_ram          RAM
+                false,  // mod_zram         ZRAM
+                false,  // mod_temp         温度
+                true,   // mod_power        功率
+                false,  // mod_current      电流
+                true,   // mod_fps          FPS
+                false,  // mod_cpu_temp     CPU温度
+        };
+
+        /**
          * 显示顺序（v1.8.0 加的）：顶层模块在监视条上怎么排，元素是 IDX_*。
          *
          * 只排顶层模块——CPU频率 / GPU频率 / 24小时制是子项，跟着父模块走。
@@ -323,6 +348,25 @@ public final class Constants {
          */
         public static final String KEY_UPDATE_INTERVAL = "update_interval_ms";
         public static final String LABEL_UPDATE_INTERVAL = "刷新时间";
+
+        /**
+         * 后台唤醒间隔（秒），v1.8.11 新增。
+         *
+         * ColorOS 这类 ROM 划掉后台卡片后会把模块进程彻底清掉，而 GPU 数据要由
+         * 模块进程用 root 读出来再回传。原来只靠监视条心跳（30 秒一次）把进程拉回来，
+         * 划卡后往往要等半分钟以上 GPU 才恢复刷新，实测有时干脆拉不起来。
+         *
+         * 这个值由用户自己定：SystemUI 每隔这么久主动 query 一次 EarlyInitProvider，
+         * 把模块进程唤起来。0 表示关闭（只保留原心跳）。
+         */
+        public static final String KEY_WAKE_INTERVAL = "wake_interval_sec";
+        public static final String LABEL_WAKE_INTERVAL = "后台唤醒";
+        /** 后台唤醒间隔的取值上下限与步长（秒） */
+        public static final int WAKE_INTERVAL_MIN_SEC = 0;
+        public static final int WAKE_INTERVAL_MAX_SEC = 300;
+        public static final int WAKE_INTERVAL_STEP_SEC = 5;
+        /** 默认关闭：不额外拉起进程，行为与 v1.8.10 一致 */
+        public static final int WAKE_INTERVAL_DEFAULT_SEC = 0;
 
         /**
          * 监视条整体位置微调（像素偏移）。

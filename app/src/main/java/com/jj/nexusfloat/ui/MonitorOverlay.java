@@ -67,6 +67,8 @@ public final class MonitorOverlay {
     private Boolean lastCollectSignal;
     /** 同一个状态连续保持了几轮，用来做周期性复发指令 */
     private int signalTicks;
+    /** 距上次后台唤醒过了多少轮（v1.8.11） */
+    private int wakeElapsedTicks;
 
     private final Runnable watchRunnable = new Runnable() {
         @Override
@@ -223,6 +225,10 @@ public final class MonitorOverlay {
         // 监视条从来没添加过，也就谈不上「移除」这个迁移，可模块进程的采集默认是开着的，
         // 得靠这里把它关掉。signalCollector 自己会去重。
         signalCollector(shouldShow);
+
+        // 后台唤醒：模块进程被 ROM 划卡清掉时，按用户设的间隔把它拉回来，
+        // 否则 GPU 数据会一直停在进程被杀之前的值
+        wakeModuleIfDue(shouldShow);
     }
 
     /**
@@ -253,6 +259,40 @@ public final class MonitorOverlay {
         signalTicks = 0;
         lastCollectSignal = collecting;
         CollectorSignal.send(context, collecting);
+    }
+
+    /**
+     * 定时把模块进程拉起来（v1.8.11）。
+     *
+     * 为什么单开一条：ColorOS 这类 ROM 划掉后台卡片后会把模块进程整个清掉，
+     * 而 GPU 数据必须由模块进程用 root 读出来再回传。原来只靠 signalCollector
+     * 的心跳（每 30 轮一次），划卡后常要等半分钟以上 GPU 才恢复，有时干脆拉不动。
+     *
+     * 这里按用户设的间隔主动 query 一次 EarlyInitProvider。query 是 binder 调用，
+     * 目标进程不在时系统会把它拉起来，正好当成唤醒手段用。
+     *
+     * 间隔为 0 表示关闭，此时不做任何事，行为跟旧版一样。
+     * 只在监视条需要显示时才唤醒：隐藏时唤起来也没人看，白耗电。
+     */
+    private void wakeModuleIfDue(boolean showing) {
+        if (!showing) {
+            wakeElapsedTicks = 0;
+            return;
+        }
+        int intervalSec = NexusBridge.getWakeIntervalSec();
+        if (intervalSec <= 0) {
+            wakeElapsedTicks = 0;
+            return;
+        }
+        // watch 循环每 WATCH_INTERVAL_MS 一轮，据此换算成需要等多少轮
+        int ticksNeeded = (int) Math.max(1,
+                intervalSec * 1000L / Constants.Overlay.WATCH_INTERVAL_MS);
+        if (++wakeElapsedTicks < ticksNeeded) {
+            return;
+        }
+        wakeElapsedTicks = 0;
+        // 复用采集指令通道：resume 本身就会唤醒模块进程并把采集打开
+        CollectorSignal.send(context, true);
     }
 
     /**

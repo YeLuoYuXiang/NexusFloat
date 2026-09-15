@@ -45,6 +45,8 @@ GPU 数据需要 root，管理器不授权 root 的话其余指标照常工作�
 | FPS | 见下面「帧率取数」 |
 | CPU温度 | 从 thermal_zone 里自动识别 CPU 那一路 |
 
+默认只开 **CPU、GPU、功率、FPS** 四项，其余在「项目」页里按需打开。
+
 每个项目的显示名称都能自定义，右侧 ↑↓ 调整在监视条上的排列顺序。
 
 ## 三、帧率取数
@@ -139,6 +141,11 @@ read -r v < /sys/class/.../scaling_cur_freq
 SystemUI 里 su 不可靠（SELinux 对 system_server 类进程管得严），所以 GPU 取数放在
 普通 App 进程里做。1.8.6 起 SystemUI 侧也会先自己试一次 root 直读，读不到才等
 App 进程传，这样重启后 App 进程没起来时 GPU 数据也不会断。
+
+ColorOS 这类 ROM 划掉后台卡片后会把模块进程直接清掉，GPU 数据就跟着停更。
+「显示时机」里有个「后台唤醒」，填个 10–30 秒，SystemUI 就会按这个间隔主动
+把模块进程唤起来（走 ContentProvider 的 query，目标进程不在时系统会拉起它）。
+默认关闭，因为唤醒本身有开销。
 
 ### 3. 设置怎么同步
 

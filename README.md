@@ -143,13 +143,14 @@ SystemUI 里 su 不可靠（SELinux 对 system_server 类进程管得严），�
 App 进程传，这样重启后 App 进程没起来时 GPU 数据也不会断。
 
 ColorOS 在最近任务里点「全部清除」会把模块进程置为 stopped 状态（等同
-`am force-stop`），这种状态下系统拒绝 ContentProvider query 之类的隐式唤醒，
-GPU 数据会一直停更；划卡只是普通杀进程，不置 stopped，所以划卡没事。
+`am force-stop`）。这个状态下系统拒绝一切隐式唤醒——ContentProvider query、
+普通广播、带 `FLAG_INCLUDE_STOPPED_PACKAGES` 的广播都不行，GPU 数据会一直停更。
+划卡只是普通杀进程、不置 stopped，所以划卡没事。
 
 「显示时机」里的「后台唤醒」就是修这个的：SystemUI 按设定间隔（默认 15 秒）
-发一条带 `FLAG_INCLUDE_STOPPED_PACKAGES` 的显式广播。这是系统对 stopped 应用
-唯一放行的口子，flag 由发送方加，而发送方就是被注入的 SystemUI 进程，
-所以不用 hook 系统框架、也不用把模块作用域扩到 system。设 0 可关闭。
+用 root 执行 `am start-service`，从后台把模块进程启动起来。走 shell 权限那条路时
+AMS 对 stopped 的拦截不适用，这是能稳定拉起来的方式。命令启动的是一个空 Service，
+只为把进程带起来，不会有任何界面。设 0 可关闭。
 
 ### 3. 设置怎么同步
 

@@ -7,7 +7,9 @@ import android.net.Uri;
 
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.utils.LogUtils;
+import com.jj.nexusfloat.utils.RootShell;
 
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -59,6 +61,79 @@ public final class CollectorSignal {
         } catch (Throwable t) {
             LogUtils.w("CollectorSignal dispatch failed: " + path, t);
         }
+    }
+
+    /**
+     * 用 root 从后台把模块进程拉起来（v1.8.11 重写）。
+     *
+     * 为什么最后走到这条路上：
+     * ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态（等同
+     * adb am force-stop）。这个状态下系统拒绝隐式唤醒，实测这些都不行：
+     * ContentProvider query、普通广播、带 FLAG_INCLUDE_STOPPED_PACKAGES 的广播。
+     * 划卡只是普通杀进程、不置 stopped，所以划卡没事——这个 bug 只在全部清除后出现。
+     *
+     * 现在改由 root 执行 am 命令启动一个空 Service。走 shell 权限那条路时，
+     * AMS 对 stopped 应用的拦截不适用，进程能被直接拉起来。进程一起来
+     * Application.onCreate 就跑，GPU 采集跟着恢复。
+     *
+     * 依次试两个入口：start-service 优先（后台启动，不会有任何界面）；
+     * 失败再试 broadcast，覆盖个别 ROM 对 service 启动更严的情况。
+     *
+     * 命令在后台线程执行：su 往返加上 am 启动进程要几百毫秒，
+     * 放 SystemUI 主线程上做会掉帧。
+     */
+    public static void wakeByRoot() {
+        try {
+            EXECUTOR.execute(CollectorSignal::runWakeCommands);
+        } catch (Throwable t) {
+            LogUtils.w("CollectorSignal root wake dispatch failed", t);
+        }
+    }
+
+    private static void runWakeCommands() {
+        String pkg = Constants.Package.MODULE;
+        String service = pkg + "/" + Constants.Component.WAKE_SERVICE;
+        // am start-service 是后台启动，不会拉起任何界面。
+        // --user 0 明确指定用户，避免分身/多用户环境下投错地方
+        String startService = "am start-service --user 0 -n " + service;
+        // 备用：广播同样能带起进程，部分 ROM 只放行这一条
+        String sendBroadcast = "am broadcast --user 0 --include-stopped-packages"
+                + " -a " + Constants.Component.ACTION_WAKE
+                + " -p " + pkg;
+
+        try {
+            List<String> out = RootShell.get().execLines(startService, 8,
+                    Constants.Config.EXEC_WAKE_TIMEOUT_MS);
+            if (out != null && !looksLikeError(out)) {
+                LogUtils.i("wake by root: start-service ok");
+                return;
+            }
+            LogUtils.w("start-service failed, trying broadcast");
+            out = RootShell.get().execLines(sendBroadcast, 8,
+                    Constants.Config.EXEC_WAKE_TIMEOUT_MS);
+            if (out != null && !looksLikeError(out)) {
+                LogUtils.i("wake by root: broadcast ok");
+                return;
+            }
+            LogUtils.w("wake by root: both commands failed");
+        } catch (Throwable t) {
+            LogUtils.w("wake by root failed", t);
+        }
+    }
+
+    /**
+     * am 命令失败时会把错误打在 stdout（比如 Error: Not found; no service started），
+     * 退出码却仍是 0，所以只能看输出内容判断。
+     */
+    private static boolean looksLikeError(List<String> lines) {
+        for (String line : lines) {
+            String s = line.trim();
+            if (s.startsWith("Error") || s.contains("not found")
+                    || s.contains("Permission Denial") || s.contains("Exception")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void query(Context context, String path) {

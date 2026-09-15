@@ -264,20 +264,20 @@ public final class MonitorOverlay {
     /**
      * 定时把模块进程拉起来（v1.8.11）。
      *
-     * 为什么需要：GPU 数据必须由模块 App 进程用 root 读出来再回传，进程没了数据就停更。
-     * 而 ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态（等同 adb
-     * am force-stop），这种状态下 ContentProvider query 会被系统直接拒绝，进程拉不起来。
-     * 划卡只是普通杀进程、不置 stopped，所以划卡是好的——这个 bug 只在全部清除后出现。
+     * 为什么需要：GPU 数据必须由模块 App 进程用 root 读出来再回传，
+     * 进程被清掉数据就停更。
      *
-     * 两条路一起发，谁通算谁：
-     * 一是显式广播，带 FLAG_INCLUDE_STOPPED_PACKAGES。这是系统对 stopped 应用唯一
-     * 放行的口子，由发送方加 flag，而我们就是发送方（SystemUI 已被注入，代码自己写），
-     * 所以不用 hook 系统框架也不需要 system 作用域。
-     * 二是原来的 Provider query，它虽然过不了 stopped 那道坎，但在没被置 stopped、
-     * 只是进程被普通回收的情况下依然有效，而且成本很低。
+     * 而 ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态
+     * （等同 adb am force-stop）。这个状态下系统会拒绝隐式唤醒，实测这些都不行：
+     * ContentProvider query、普通广播、带 FLAG_INCLUDE_STOPPED_PACKAGES 的广播。
+     * 划卡只是普通杀进程、不置 stopped，所以划卡没事——这个 bug 只在全部清除后出现。
      *
-     * 间隔由用户设，0 表示关闭（行为跟旧版一致）。只在监视条需要显示时才唤醒，
-     * 隐藏时唤起来也没人看，白耗电。
+     * 所以主路改成 root：用 su 执行 am start-service 启动一个空 Service，
+     * 把模块进程直接带起来。走 shell 权限那条路时 AMS 对 stopped 的拦截不适用。
+     * 后面两条留作兜底，覆盖 no-root 或者 ROM 对 am 也做了限制的情况。
+     *
+     * 间隔由用户设，0 表示只用原来的心跳、不做额外唤醒。
+     * 只在监视条需要显示时才唤醒：隐藏时唤起来也没人看，白耗电。
      */
     private void wakeModuleIfDue(boolean showing) {
         if (!showing) {
@@ -296,8 +296,9 @@ public final class MonitorOverlay {
             return;
         }
         wakeElapsedTicks = 0;
-        // 广播优先：它能穿透 stopped 状态。Provider query 作补充，
-        // 覆盖「进程只是被普通回收」的情况
+        // 主路：root 起 Service，能穿透 stopped 状态
+        CollectorSignal.wakeByRoot();
+        // 兜底两条，成本都很低：万一没有 root，或者某 ROM 把 am 也限制住了
         CollectorSignal.wakeByBroadcast(context);
         CollectorSignal.send(context, true);
     }

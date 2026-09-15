@@ -5,9 +5,9 @@
 
 ## 1.8.11
 
-- 修复 ColorOS「全部清除后台」后 GPU 数据停更：改用带
-  `FLAG_INCLUDE_STOPPED_PACKAGES` 的显式广播唤醒模块进程
-  （原来走 ContentProvider query，被 stopped 状态直接拒绝）
+- 修复 ColorOS「全部清除后台」后 GPU 数据停更：改由 root 定时执行 `am` 命令
+  从后台启动模块进程（不会弹界面）。ContentProvider、广播这类隐式唤醒手段
+  在 stopped 状态下会被系统拒绝，所以划卡正常、全部清除就失效
 - 「显示时机」新增「后台唤醒」定时，0–300 秒可调，默认 15 秒，0 为关闭
 - 默认开启的项目精简为 CPU、GPU、功率、FPS 四项
 

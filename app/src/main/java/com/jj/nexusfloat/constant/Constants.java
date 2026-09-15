@@ -44,6 +44,14 @@ public final class Constants {
         public static final int UPDATE_INTERVAL_STEP_MS = 100;
         /** su 命令超时（毫秒） */
         public static final int EXEC_TIMEOUT_MS = 8000;
+        /**
+         * 后台唤醒命令的超时（毫秒），比普通读节点宽松。
+         *
+         * am start-service 要经过 AMS 启动一个新进程，冷启动时本身就要几百毫秒，
+         * 加上 su 往返，600ms 那个默认值不够用。给足 3 秒，避免命令还没跑完
+         * 就被判定超时、白白重试一遍。
+         */
+        public static final int EXEC_WAKE_TIMEOUT_MS = 3000;
         /** 等 XposedService 绑定时，每多少拍打一条 warn 日志 */
         public static final int SERVICE_BIND_WARN_EVERY_TICKS = 5;
         /** FPS 显示：低于这个值保留一位小数，否则显示整数 */
@@ -724,6 +732,12 @@ public final class Constants {
                 Package.MODULE + ".action.WAKE_COLLECTOR";
         public static final String RECEIVER_WAKE =
                 Package.MODULE + ".service.WakeReceiver";
+        /**
+         * 被 root 的 am 命令启动的空 Service 全限定名（v1.8.11）。
+         * SystemUI 侧拼成 {@code 包名/类名} 交给 am start-service。
+         */
+        public static final String WAKE_SERVICE =
+                Package.MODULE + ".service.WakeService";
         /** 快照 Cursor 的列名：键、类型、值 */
         public static final String COL_KEY = "k";
         public static final String COL_TYPE = "t";

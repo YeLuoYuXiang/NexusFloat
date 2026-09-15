@@ -63,13 +63,13 @@
         <!--
             被 SystemUI 唤醒（v1.8.11）。
 
-            必须 exported=true：SystemUI 是另一个应用（虽然是 system uid），
-            要能发广播到这个接收者。action 带包名前缀，且下面的 intent-filter
-            只认这一个 action，别的应用发不出有意义的指令。
+            必须 exported=true：SystemUI 是另一个应用，要能发广播到这个接收者。
+            action 带包名前缀，且下面的 intent-filter 只认这一个 action，
+            别的应用发不出有意义的指令。
 
             ColorOS 全部清除后台会把本应用置为 stopped 状态，这个状态下只有带
             FLAG_INCLUDE_STOPPED_PACKAGES 的广播能送达——SystemUI 侧发广播时
-            会带上它（见 CollectorSignal.wakeByBroadcast）。
+            会带上它（见 CollectorSignal.wakeModule）。
         -->
         <receiver
             android:name=".service.WakeReceiver"
@@ -79,21 +79,6 @@
                 <action android:name="com.jj.nexusfloat.action.WAKE_COLLECTOR" />
             </intent-filter>
         </receiver>
-
-        <!--
-            被 root 的 am 命令拉起的空 Service（v1.8.11）。
-
-            用途只有一个：把模块进程带起来，进程一起来 GPU 采集就恢复。
-
-            exported=true 是必须的：SystemUI 是另一个应用，即使是 system uid
-            也要能启动它。实际入口只有 root 执行的 am start-service，应用层没有别的路。
-
-            不用 android:process 另开进程——就是要主进程被拉起来。
-        -->
-        <service
-            android:name=".service.WakeService"
-            android:enabled="true"
-            android:exported="true" />
 
     </application>
 

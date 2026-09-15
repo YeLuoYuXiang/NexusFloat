@@ -20,7 +20,6 @@ import com.jj.nexusfloat.bridge.SettingsChannel;
 import com.jj.nexusfloat.collector.ForegroundAppTracker;
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.service.CollectorSignal;
-import com.jj.nexusfloat.service.WakeLog;
 import com.jj.nexusfloat.ui.view.MonitorView;
 import com.jj.nexusfloat.utils.LogUtils;
 
@@ -70,8 +69,6 @@ public final class MonitorOverlay {
     private int signalTicks;
     /** 距上次后台唤醒过了多少轮（v1.8.11） */
     private int wakeElapsedTicks;
-    /** 上次唤醒时的 GPU 读数，用来在下一轮确认唤醒是否真的生效 */
-    private int lastGpuMhzAtWake = Constants.Config.UNPUBLISHED;
 
     private final Runnable watchRunnable = new Runnable() {
         @Override
@@ -233,8 +230,6 @@ public final class MonitorOverlay {
         // 否则 GPU 数据会一直停在进程被杀之前的值
         wakeModuleIfDue(shouldShow);
 
-        // 上一轮唤醒的效果确认，紧跟在唤醒之后，隔一轮看结果
-        confirmWakeEffect();
     }
 
     /**
@@ -268,22 +263,15 @@ public final class MonitorOverlay {
     }
 
     /**
-     * 定时把模块进程拉起来（v1.8.11）。
+     * 定时唤醒模块进程（v1.8.11）。
      *
-     * 为什么需要：GPU 数据必须由模块 App 进程用 root 读出来再回传，
-     * 进程被清掉数据就停更。
+     * 为什么需要：GPU 数据由模块 App 进程用 root 读出来再回传，进程被清掉数据就停更。
+     * ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态，这种状态下
+     * 系统只放行带 FLAG_INCLUDE_STOPPED_PACKAGES 的广播。划卡只是普通杀进程、
+     * 不置 stopped，所以划卡没事，只有全部清除后才需要这条。
      *
-     * 而 ColorOS 在最近任务里点「全部清除」会把应用置为 stopped 状态
-     * （等同 adb am force-stop）。这个状态下系统会拒绝隐式唤醒，实测这些都不行：
-     * ContentProvider query、普通广播、带 FLAG_INCLUDE_STOPPED_PACKAGES 的广播。
-     * 划卡只是普通杀进程、不置 stopped，所以划卡没事——这个 bug 只在全部清除后出现。
-     *
-     * 所以主路改成 root：用 su 执行 am start-service 启动一个空 Service，
-     * 把模块进程直接带起来。走 shell 权限那条路时 AMS 对 stopped 的拦截不适用。
-     * 后面两条留作兜底，覆盖 no-root 或者 ROM 对 am 也做了限制的情况。
-     *
-     * 间隔由用户设，0 表示只用原来的心跳、不做额外唤醒。
-     * 只在监视条需要显示时才唤醒：隐藏时唤起来也没人看，白耗电。
+     * 频率由用户设定，0 表示关闭、只用原来的心跳。
+     * 只在监视条需要显示时才唤醒，隐藏时唤起来没人看，白耗电。
      */
     private void wakeModuleIfDue(boolean showing) {
         if (!showing) {
@@ -302,38 +290,9 @@ public final class MonitorOverlay {
             return;
         }
         wakeElapsedTicks = 0;
-        // 记下唤醒前的 GPU 读数，下一轮拿来对比，判断唤醒到底有没有效果。
-        // 只看「命令有没有报错」不够——命令成功但进程起来后没采集，GPU 照样是旧的
-        int beforeMhz = NexusBridge.getGpuFreqMhz();
-        WakeLog.add("发起唤醒（当前 GPU=" + (beforeMhz > 0 ? beforeMhz + "MHz" : "无数据") + "）");
-        // 主路：root 起 Service，能穿透 stopped 状态
-        CollectorSignal.wakeByRoot();
-        // 兜底两条，成本都很低：万一没有 root，或者某 ROM 把 am 也限制住了
-        CollectorSignal.wakeByBroadcast(context);
+        CollectorSignal.wakeModule(context);
+        // 顺带确认采集在跑：模块进程刚被广播唤起时，需求还没打开
         CollectorSignal.send(context, true);
-        lastGpuMhzAtWake = beforeMhz;
-    }
-
-    /**
-     * 唤醒后的效果确认（v1.8.11）。
-     *
-     * 上一轮发过唤醒的话，这里比一次 GPU 读数：变了说明确实救回来了，
-     * 没变说明命令即使报成功、进程也没真正开始采集。这一步是给排查用的——
-     * ColorOS 上这条链路反复出问题，光看命令回显判断不了成败。
-     */
-    private void confirmWakeEffect() {
-        if (lastGpuMhzAtWake == Constants.Config.UNPUBLISHED) {
-            return;
-        }
-        int nowMhz = NexusBridge.getGpuFreqMhz();
-        if (nowMhz > 0 && nowMhz != lastGpuMhzAtWake) {
-            WakeLog.add("唤醒有效：GPU 已更新为 " + nowMhz + "MHz");
-        } else if (nowMhz > 0) {
-            WakeLog.add("GPU 仍是 " + nowMhz + "MHz（可能与负载不变有关，未确认失败）");
-        } else {
-            WakeLog.add("唤醒无效：GPU 依然没有数据");
-        }
-        lastGpuMhzAtWake = Constants.Config.UNPUBLISHED;
     }
 
     /**

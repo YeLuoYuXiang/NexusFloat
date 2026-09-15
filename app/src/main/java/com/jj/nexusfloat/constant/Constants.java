@@ -22,13 +22,9 @@ public final class Constants {
         /**
          * 输出不输出调试日志（logcat 标签是 Constants.TAG，同时写进 LSPosed 模块日志）。
          *
-         * v1.6.8~v1.6.11 的 debug 版开着它排查过澎湃 OS 4 的问题，之后关了回去。
-         *
-         * v1.8.11 重新打开：ColorOS 后台唤醒这条链路反复修不好，而日志关着的时候
-         * LSPosed 日志里连模块名都搜不到，用户和开发都拿不到现场数据，只能靠猜。
-         * 分辨率调大一点能接受，排查完再关。
+         * 发布版是 false；排查问题时改成 true 重新编译安装就行。
          */
-        public static final boolean LOG_ENABLED = true;
+        public static final boolean LOG_ENABLED = false;
 
         /** 数据采集和 UI 刷新间隔（毫秒）的默认值 */
         public static final int UPDATE_INTERVAL_MS = 1000;
@@ -46,14 +42,6 @@ public final class Constants {
         public static final int UPDATE_INTERVAL_STEP_MS = 100;
         /** su 命令超时（毫秒） */
         public static final int EXEC_TIMEOUT_MS = 8000;
-        /**
-         * 后台唤醒命令的超时（毫秒），比普通读节点宽松。
-         *
-         * am start-service 要经过 AMS 启动一个新进程，冷启动时本身就要几百毫秒，
-         * 加上 su 往返，600ms 那个默认值不够用。给足 3 秒，避免命令还没跑完
-         * 就被判定超时、白白重试一遍。
-         */
-        public static final int EXEC_WAKE_TIMEOUT_MS = 3000;
         /** 等 XposedService 绑定时，每多少拍打一条 warn 日志 */
         public static final int SERVICE_BIND_WARN_EVERY_TICKS = 5;
         /** FPS 显示：低于这个值保留一位小数，否则显示整数 */
@@ -712,55 +700,25 @@ public final class Constants {
         public static final String PATH_PREFS = "prefs";
 
         /**
-         * 唤醒诊断记录的 query 路径（v1.8.11）。
-         * 唤醒由 SystemUI 侧发起、记录也在那边，App 查这条路径把文本拿回来显示。
-         */
-        public static final String PATH_WAKE_LOG = "wake_log";
-
-        /**
-         * 唤醒诊断的落盘路径（v1.8.11）。
-         *
-         * 记录产生在 SystemUI 进程，看的人在 App 界面，跨进程读不到静态变量，
-         * 所以 SystemUI 用 root 追加写这个文件，App 读自己私有目录下的同一份。
-         *
-         * 路径写死成 /data/data/<包名>/files/... 而不是运行时算：写侧是 SystemUI、
-         * 拿不到模块的 Context。模块装机路径固定就是这个，App 侧读的时候
-         * 用同一个串做校验即可。
-         */
-        public static final String WAKE_LOG_FILE = "wake_diag.txt";
-        public static final String WAKE_LOG_PATH =
-                "/data/data/" + Package.MODULE + "/files/" + WAKE_LOG_FILE;
-
-        /**
-         * 唤醒广播的 action 与接收者（v1.8.11 重写）。
+         * 唤醒广播的 action（v1.8.11）。
          *
          * 背景：ColorOS 在「最近任务」里点全部清除，会把应用置为 Android 的
-         * stopped 状态（等同于 adb am force-stop，包被标记 stopped=true）。
-         * 这个状态下系统拒绝一切隐式唤醒手段，也包括我们原来用的
-         * ContentProvider query——进程根本拉不起来，GPU 数据就一直停更。
-         * 划卡只是普通杀进程，不置 stopped，所以划卡时是好的，
-         * 这也是这个 bug 只在 ColorOS 全部清除后出现的原因。
+         * stopped 状态（等同 adb am force-stop）。这个状态下系统拒绝一切隐式
+         * 唤醒手段，ContentProvider query 也拉不起进程，GPU 数据就一直停更。
+         * 划卡只是普通杀进程、不置 stopped，所以划卡没事——这个 bug 只在
+         * 全部清除之后出现。
          *
          * 系统对 stopped 应用放行的条件只有一个：Intent 带
-         * FLAG_INCLUDE_STOPPED_PACKAGES。而这个 flag 由发送方加，
-         * 我们的发送方正是被注入了的 SystemUI 进程，能自己控制它。
-         * 所以用显式广播唤醒，不依赖任何系统侧 hook。
+         * FLAG_INCLUDE_STOPPED_PACKAGES。这个 flag 由发送方加，而发送方正是
+         * 被注入的 SystemUI 进程，所以不用 hook 系统框架，也不用把模块作用域
+         * 扩到 system。
          *
-         * 接收者必须 exported：LSPosed 只给模块注入了 com.android.systemui，
-         * 模块进程不在被注入清单里，这里走的是普通 Android 组件通信。
+         * 接收者必须 exported：SystemUI 是另一个应用，要能发到这个广播。
          * action 带包名前缀，别的应用即使知道也只会打到我们自己包里。
          */
         public static final String ACTION_WAKE =
                 Package.MODULE + ".action.WAKE_COLLECTOR";
-        public static final String RECEIVER_WAKE =
-                Package.MODULE + ".service.WakeReceiver";
-        /**
-         * 被 root 的 am 命令启动的空 Service 全限定名（v1.8.11）。
-         * SystemUI 侧拼成 {@code 包名/类名} 交给 am start-service。
-         */
-        public static final String WAKE_SERVICE =
-                Package.MODULE + ".service.WakeService";
-        /** 快照 Cursor 的列名：键、类型、值 */
+                /** 快照 Cursor 的列名：键、类型、值 */
         public static final String COL_KEY = "k";
         public static final String COL_TYPE = "t";
         public static final String COL_VALUE = "v";

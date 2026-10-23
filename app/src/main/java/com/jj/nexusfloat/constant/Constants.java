@@ -23,6 +23,10 @@ public final class Constants {
          * 输出不输出调试日志（logcat 标签是 Constants.TAG，同时写进 LSPosed 模块日志）。
          *
          * 发布版是 false；排查问题时改成 true 重新编译安装就行。
+         *
+         * 关掉不是因为它占多少 CPU——日志调用点基本都在异常和一次性事件上，
+         * 每秒热路径只有「帧率全链失败」和「采样异常」两条，正常运行时都不触发。
+         * 关掉是为了彻底不留余地：真出问题时改这一个常量重编，诊断信息立刻回来。
          */
         public static final boolean LOG_ENABLED = false;
 

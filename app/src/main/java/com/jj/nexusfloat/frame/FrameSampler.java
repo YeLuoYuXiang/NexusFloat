@@ -123,6 +123,21 @@ public final class FrameSampler {
     private volatile Intent batteryIntent;
     private int rootMisses;
 
+    /**
+     * 面板帧率连续失败的拍数，以及跳过计数的剩余拍数。
+     *
+     * 面板那条路读不到时要展开全部候选路径扫两遍（direct 一次、root 一次），
+     * 在模块 App 进程里没有 root 或者节点不可读时，单拍能耗好几秒。而采样周期
+     * 只有 1 秒，采样线程会被拖死——表现就是球上一直是 --，点按也没反应。
+     * 连续失败就跳过若干拍，只保留低频复探。
+     */
+    private int panelMissStreak;
+    private int panelSkipLeft;
+    /** 面板连续失败多少拍后开始跳过 */
+    private static final int PANEL_MISS_LIMIT = 2;
+    /** 跳过多少拍后复探一次 */
+    private static final int PANEL_SKIP_TICKS = 30;
+
     private static volatile FrameSampler sInstance;
 
     /** 进程级单例：悬浮球、前台服务、记录页三处共用同一个状态 */
@@ -461,14 +476,30 @@ public final class FrameSampler {
         String pkg = fgPkg;
 
         if (enabled[Constants.Modules.FpsSource.IDX_PANEL]) {
-            float fps = SysfsReader.direct().readFps();
-            if (fps <= 0f) {
-                fps = SysfsReader.root().readFps();
+            // 熔断：连续读不到就先跳过一阵，别让全表扫描把采样线程拖死。
+            // 复探那一拍照常扫，能读到就自动恢复
+            boolean tryPanel = true;
+            if (panelSkipLeft > 0) {
+                panelSkipLeft--;
+                tryPanel = false;
             }
-            if (fps > 0f) {
-                s.fps = fps;
-                s.fpsSrc = Constants.Fps.TAG_PANEL;
-                return;
+            if (tryPanel) {
+                float fps = SysfsReader.direct().readFps();
+                if (fps <= 0f) {
+                    fps = SysfsReader.root().readFps();
+                }
+                if (fps > 0f) {
+                    panelMissStreak = 0;
+                    panelSkipLeft = 0;
+                    s.fps = fps;
+                    s.fpsSrc = Constants.Fps.TAG_PANEL;
+                    return;
+                }
+                // 读不到：累积失败次数，到阈值就转入跳过
+                if (++panelMissStreak >= PANEL_MISS_LIMIT) {
+                    panelMissStreak = 0;
+                    panelSkipLeft = PANEL_SKIP_TICKS;
+                }
             }
         }
         if (enabled[Constants.Modules.FpsSource.IDX_SF_LATENCY]) {
@@ -520,6 +551,10 @@ public final class FrameSampler {
             }
         }
         if (s.fps == 0f && s.fpsSrc.isEmpty()) {
+        // 诊断：全链失败时把关键上下文打出来，方便判断卡在哪一环
+        LogUtils.w(TAG + " fps chain failed: pkg=" + pkg
+                + " panelSkip=" + panelSkipLeft
+                + " enabled=" + java.util.Arrays.toString(enabled));
             // 全链没人给出 0 也没人给出正数：这条路在本机确实读不到
             s.fps = Constants.Fps.READ_FAILED;
         }

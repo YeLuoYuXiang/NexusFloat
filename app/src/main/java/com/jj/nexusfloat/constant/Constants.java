@@ -830,6 +830,11 @@ public final class Constants {
          * 只剩 ASCII 字母数字和 +/=。
          */
         public static final String SETTINGS_KEY = "nexusfloat_prefs";
+        /**
+         * 帧率同步用的键（Settings.Global）：监视条每秒把当前帧率写到这里，
+         * 帧记录读它，保证两处显示的帧率一致。
+         */
+        public static final String SETTINGS_KEY_FPS_SYNC = "nexusfloat_fps_sync";
         /** 快照文本里的行分隔符和键值分隔符 */
         public static final char SNAPSHOT_LINE_SEP = '\n';
         public static final char SNAPSHOT_KV_SEP = '=';

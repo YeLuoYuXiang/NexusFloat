@@ -467,9 +467,9 @@ public final class FrameBubble {
             // 可用区域是球宽/高各扣掉左右各 3dp 的内边距
             float availW = w - dp(6);
             float availH = h - dp(6);
-            text.setTextSize(dp(15));
+            text.setTextSize(dp(12));
             float measured = text.measureText(label);
-            float fitByWidth = measured > 0f ? text.getTextSize() * availW / measured : dp(15);
+            float fitByWidth = measured > 0f ? text.getTextSize() * availW / measured : dp(12);
             float fitByHeight = availH * 0.72f;
             text.setTextSize(Math.min(fitByWidth, fitByHeight));
 

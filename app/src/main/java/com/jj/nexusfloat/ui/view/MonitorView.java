@@ -12,6 +12,7 @@ import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.jj.nexusfloat.bridge.FpsSyncBridge;
 import com.jj.nexusfloat.collector.PerformanceCollector;
 import com.jj.nexusfloat.constant.Constants;
 
@@ -94,6 +95,11 @@ public class MonitorView extends LinearLayout {
     private final boolean[] moduleEnabled = newAllEnabled();
     /** 算上父项之后的实际可见性，预先分配好，省得每次新建 */
     private final boolean[] effective = newAllEnabled();
+    /**
+     * 上下文。除了建 View，还用来把当前帧率同步给模块进程
+     * （见 updateData 里的 FpsSyncBridge.publish）。
+     */
+    private final Context context;
     /**
      * 各模块名称位的 TextView，下标跟 Constants.Modules#KEYS 一致。
      * CPU频率 / GPU频率 的数值在父项括号里，没有名称位，所以是 null。
@@ -185,6 +191,7 @@ public class MonitorView extends LinearLayout {
 
     public MonitorView(Context context) {
         super(context);
+        this.context = context;
         init(context);
     }
 
@@ -1130,6 +1137,11 @@ public class MonitorView extends LinearLayout {
             batCurrentText.setText(clip(Constants.Ui.PROBE_CURRENT,
                     String.format(Locale.US, "%+dmA", (int) data.batteryCurrentMa)));
         }
+        // 把这一拍的帧率同步给模块进程，供「记录」页使用。
+        // 放在 effective 判断之外：即便用户把监视条的 FPS 项关掉了，
+        // 帧记录那边仍然需要一个可信的帧率来源
+        FpsSyncBridge.publish(context, data.fps, data.fpsTag);
+
         if (effective[Constants.Modules.IDX_FPS]) {
             String probe = fpsDebugEnabled
                     ? Constants.Ui.PROBE_FPS_DEBUG : Constants.Ui.PROBE_FPS;

@@ -208,6 +208,32 @@ public final class SettingsChannel {
     }
 
     /**
+     * 往 Settings.Global 写一个独立的键值（不走 prefs 打包）。
+     *
+     * 给「帧率同步」这种高频、单值的数据用：每秒都要更新，打包整个 prefs
+     * 再写一遍太重。写入仍然走 root 的 settings 命令。
+     *
+     * 返回写成功没有。
+     */
+    public static boolean writeRaw(Context ctx, String key, String value) {
+        if (ctx == null || key == null || value == null) {
+            return false;
+        }
+        try {
+            RootShell shell = RootShell.get();
+            if (shell.isDead()) {
+                return false;
+            }
+            String cmd = "settings put global " + key + " " + RootShell.quote(value);
+            shell.execLines(cmd, 1, Constants.Component.SETTINGS_WRITE_TIMEOUT_MS);
+            return true;
+        } catch (Throwable t) {
+            LogUtils.w("SettingsChannel writeRaw failed", t);
+            return false;
+        }
+    }
+
+    /**
      * 把 prefs 编码成 key=type:value 的行集合。
      *
      * 带类型标记的理由跟 provider 那条通道一样：跨进程只能传字符串，对端得知道

@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 
+import com.jj.nexusfloat.bridge.FpsSyncBridge;
 import com.jj.nexusfloat.bridge.NexusBridge;
 import com.jj.nexusfloat.collector.BatteryGauge;
 import com.jj.nexusfloat.collector.CpuTempReader;
@@ -480,6 +481,21 @@ public final class FrameSampler {
      * - =-1（READ_FAILED）：所有来源都没读到，曲线里画成断点，不当成 0
      */
     private void resolveFps(FrameRecordStore.Sample s) {
+        // 优先用监视条同步过来的帧率。
+        //
+        // 帧记录跑在模块 App 进程里，能看到的 layer 和节点权限跟监视条
+        // （SystemUI 进程）不一样，两边各算一套经常对不上：监视条显示 60，
+        // 记录页却是 --。既然监视条那个数已经调准了，直接拿它的结果，
+        // 两处显示自然一致。
+        //
+        // 读不到（监视条没在跑 / 通道没通）才退回自己算。
+        float synced = FpsSyncBridge.read(context);
+        if (!Float.isNaN(synced) && synced >= 0f) {
+            s.fps = synced;
+            s.fpsSrc = FpsSyncBridge.readTag(context);
+            return;
+        }
+
         boolean[] enabled = NexusBridge.readFpsSourceFlags();
         boolean preferRoot = NexusBridge.isSfPreferRoot();
         String pkg = fgPkg;

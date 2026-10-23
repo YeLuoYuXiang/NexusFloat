@@ -108,6 +108,11 @@ private val FrameTempCpuColor = TempColor
 private val FrameTempGpuColor = PowerColor
 /** 电池温度曲线：用绿色跟 CPU 的橙色区分开 */
 private val FrameTempBatteryColor = Color(0xFF16A34A)
+/** CPU 各簇频率曲线的配色：蓝 / 橙 / 紫 / 青，四色够区分绝大多数 SoC */
+private val FrameCpuCluster0 = Color(0xFF3B82F6)
+private val FrameCpuCluster1 = Color(0xFFF59E0B)
+private val FrameCpuCluster2 = Color(0xFF8B5CF6)
+private val FrameCpuCluster3 = Color(0xFF06B6D4)
 
 /** 一屏要展示的数据，一次 IO 装齐 */
 private class FrameListData(
@@ -368,7 +373,16 @@ private fun DeviceCard() {
             )
             MetricTile(
                 title = "安卓版本",
-                value = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})",
+                // 只显示主版本号（Android 14 / 15），后面的 SDK 号和补丁号
+                // 对玩家没意义，还会把格子撑成两行。
+                // RELEASE 理论上是 "14" 这种纯数字，但部分定制 ROM 会塞成
+                // "14.0.1" 甚至空串，所以取点号前的一段，空了退回 "未知"
+                value = "Android " + (
+                        Build.VERSION.RELEASE
+                            ?.substringBefore(".")
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: "未知"
+                        ),
                 modifier = Modifier.weight(1f),
                 compact = true,
                 iconRes = R.drawable.ic_dev_android_ink,
@@ -1074,19 +1088,19 @@ private fun SummaryCard(r: FrameRecordStore.Record) {
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile(
-                title = "平均 CPU 温",
+                title = "平均 CPU\n温度",
                 value = if (r.avgCpuTemp > 0f)
                     String.format(Locale.US, "%.1f°C", r.avgCpuTemp) else "--",
                 modifier = Modifier.weight(1f), compact = true
             )
             MetricTile(
-                title = "最大 CPU 温",
+                title = "最大 CPU\n温度",
                 value = if (r.peakCpuTemp > 0f)
                     String.format(Locale.US, "%.1f°C", r.peakCpuTemp) else "--",
                 modifier = Modifier.weight(1f), compact = true
             )
             MetricTile(
-                title = "最大电池温",
+                title = "最大电池\n温度",
                 value = if (r.peakBatteryTemp > 0f)
                     String.format(Locale.US, "%.1f°C", r.peakBatteryTemp) else "--",
                 modifier = Modifier.weight(1f), compact = true
@@ -1190,32 +1204,56 @@ private fun DetailCharts(samples: List<FrameRecordStore.Sample>) {
         )
     }
 
-    // ---- CPU 频率：只画一条，取这一拍里最高的那个簇 ----
+    // ---- CPU 频率：按簇各画一条 ----
     //
-    // 早先按簇画多条（簇 0/1/2…），问题是用户得先分清哪条是大核，而真正
-    // 和掉帧相关的是「当前跑得最高的那个簇」。统一成一条：取各簇频率的最大值，
-    // 正好是顶部悬浮栏 CPU 频率那个括号里靠右的数，两边可以对着看。
-    SectionCard(title = "CPU 频率 (MHz · 各簇最高)") {
-        val freqs = samples.map { s ->
-            val arr = s.cpuFreqs
-            if (arr == null) null else arr.filter { it > 0 }.maxOrNull()?.toFloat()
-        }
-        val known = freqs.filterNotNull()
-        if (known.isEmpty()) {
+    // 结理器通常有 2~3 个 cpufreq policy（小核簇 / 大核簇 / 超大核簇），
+    // 每簇的频率曲线形状完全不同——小核常年低位、超大核只在重载时抬起来。
+    // 只画一条「各簇最高」会把这种差异抹平，看不出到底哪个核在拉频率。
+    //
+    // 簇的数量按样本里出现过的最大下标算；缺拍的簇在那一列画成断点。
+    SectionCard(title = "CPU 频率 (MHz · 各簇)") {
+        // 先扫一遍样本，确定最多有几个簇
+        val clusterCount = samples.maxOfOrNull { it.cpuFreqs?.size ?: 0 } ?: 0
+        if (clusterCount == 0) {
             EmptyHint("读不到 CPU 频率节点。")
         } else {
-            val peak = known.maxOrNull() ?: 0f
-            val min = known.minOrNull() ?: 0f
-            val (axisMin, axisMax, step) = freqAxis(min, peak)
-            LineChart(
-                lines = listOf(ChartLine("CPU 频率", FrameCpuColor, freqs)),
-                leftMin = axisMin,
-                leftMax = axisMax,
-                leftStep = step,
-                leftFormat = { it.toInt().toString() },
-                xTicks = ticks,
-                xValues = times
-            )
+            // 每个簇一条序列；下标 i 那一簇，取 samples 里同位置的值
+            val series = (0 until clusterCount).map { idx ->
+                samples.map { s ->
+                    val arr = s.cpuFreqs
+                    if (arr == null || idx >= arr.size || arr[idx] <= 0) null
+                    else arr[idx].toFloat()
+                }
+            }
+            val known = series.flatMap { it.filterNotNull() }
+            if (known.isEmpty()) {
+                EmptyHint("读不到 CPU 频率节点。")
+            } else {
+                val peak = known.maxOrNull() ?: 0f
+                val min = known.minOrNull() ?: 0f
+                val (axisMin, axisMax, step) = freqAxis(min, peak)
+                // 每簇一个颜色。簇多的时候按色板循环取，保证相邻两条不撞色
+                val palette = listOf(
+                    FrameCpuCluster0, FrameCpuCluster1, FrameCpuCluster2,
+                    FrameCpuCluster3, FrameCpuCluster0
+                )
+                val lines = series.mapIndexed { idx, values ->
+                    ChartLine(
+                        "簇 $idx",
+                        palette[idx % palette.size],
+                        values
+                    )
+                }
+                LineChart(
+                    lines = lines,
+                    leftMin = axisMin,
+                    leftMax = axisMax,
+                    leftStep = step,
+                    leftFormat = { it.toInt().toString() },
+                    xTicks = ticks,
+                    xValues = times
+                )
+            }
         }
     }
 

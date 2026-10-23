@@ -40,16 +40,24 @@ import io.github.libxposed.api.XposedModule;
  */
 public class ModuleMain extends XposedModule {
 
-    private MonitorView monitorView;
-    private MonitorOverlay overlay;
-    private StatusBarTintBridge tintBridge;
+    /**
+     * 注入相关字段全部改 static（v1.9.3）。
+     *
+     * LSPosed 对同一个入口类可能创建多个实例，而本类有两条注入路径
+     * （Fragment 的 onViewCreated 和 scheduleFallbackInject 的三路兜底）。
+     * 字段是实例级时，两条路径各持有一份 monitorView / overlay / injected，
+     * 互相不知道对方注入过，去重形同虚设——这是进程内出现两个悬浮窗的原因之一。
+     */
+    private static MonitorView monitorView;
+    private static MonitorOverlay overlay;
+    private static StatusBarTintBridge tintBridge;
 
     /** 已经成功注入过一次，兜底路径靠它避免重复注入 */
-    private volatile boolean injected;
+    private static volatile boolean injected;
     /** 兜底注入排程了没有，免得两个入口各排一轮 */
-    private volatile boolean fallbackScheduled;
+    private static volatile boolean fallbackScheduled;
     /** 兜底注入还剩几次重试机会 */
-    private int fallbackRetriesLeft = Constants.SystemUi.FALLBACK_INJECT_RETRIES;
+    private static int fallbackRetriesLeft = Constants.SystemUi.FALLBACK_INJECT_RETRIES;
 
     @Override
     public void onPackageReady(PackageReadyParam param) {
@@ -396,6 +404,22 @@ public class ModuleMain extends XposedModule {
         LogUtils.xposed(this, Log.INFO, "injectMonitorView: context=" + context
                 + " root=" + root);
 
+        // 跨进程去重（v1.9.3，重影修复 L3）：只允许主 SystemUI 进程注入。
+        //
+        // 三星等系统会按需 fork com.android.systemui:multiwindowui，那个从进程同样
+        // 被 LSPosed 注入，于是各自建了一个同名悬浮窗。两个窗口的 BLASTBufferQueue
+        // 向 SurfaceFlinger 提交同一坐标的图层，合成后就是重影。
+        //
+        // 判据用进程名而不是标志位：进程名是确定的，不存在 check-then-act 竞态，
+        // 也不需要任何跨进程通信。早先试过用 Settings.Global 存 pid 再校验持有者
+        // 死活，那条路在 SystemUI 内被 SELinux 拦掉（读不到别的进程的 /proc/<pid>），
+        // 双方都判定"持有者已死"反而更糟。
+        if (!isMainSystemUiProcess()) {
+            LogUtils.xposed(this, Log.INFO,
+                    "not the main SystemUI process, skip inject to avoid ghost overlay");
+            return;
+        }
+
         FrameLayout statusBar = null;
         if (root != null) {
             View statusBarRoot =
@@ -465,6 +489,39 @@ public class ModuleMain extends XposedModule {
         }
 
         LogUtils.xposed(this, Log.INFO, "MonitorView injected");
+    }
+
+    /**
+     * 当前进程是不是主 SystemUI 进程。
+     *
+     * 读 /proc/self/cmdline 取进程名。self 读自己一定成功，不受 SELinux 对
+     * /proc/<other-pid> 的跨进程限制。
+     *
+     * 读不到（异常、或者内核给了空串）时返回 true：宁可多注入一次，也不要因为
+     * 一次读取失败就让悬浮条彻底消失。
+     */
+    private static boolean isMainSystemUiProcess() {
+        String name = currentProcessName();
+        if (name == null || name.isEmpty()) {
+            return true;
+        }
+        return Constants.Package.SYSTEM_UI.equals(name);
+    }
+
+    /** 读 /proc/self/cmdline 拿进程名，读不到返回 null */
+    private static String currentProcessName() {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/self/cmdline"))) {
+            StringBuilder sb = new StringBuilder(64);
+            int c;
+            // '\0' 与 EOF 都会让 read() 返回 <= 0，到这里就该停
+            while ((c = r.read()) > 0) {
+                sb.append((char) c);
+            }
+            return sb.length() == 0 ? null : sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void wakeCollectorSafely(Context context) {

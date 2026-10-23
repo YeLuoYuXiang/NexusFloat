@@ -31,6 +31,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -136,6 +138,11 @@ fun FrameRecordScreen(modifier: Modifier = Modifier) {
     // 悬浮球开关状态：点按后本地立即翻转，3 秒刷一次时再跟服务真实状态对一遍
     // （长按收球、通知里关掉这类页面外的关闭也能同步回来，不会一直亮着「关闭」）
     var bubbleOn by remember { mutableStateOf(FrameRecordService.isRunning()) }
+
+    // 「使用情况访问」只在本次进入页面后、第一次开悬浮球时问（v1.9.3）。
+    // 问过就记住，之后不再弹——每次开球都弹一遍纯属骚扰
+    var usageAccessAsked by remember { mutableStateOf(false) }
+    var showUsageAccessDialog by remember { mutableStateOf(false) }
 
     // 二级视图：被点开的那条记录 id，0 表示没打开
     var detailId by remember { mutableStateOf(0L) }
@@ -329,17 +336,109 @@ fun FrameRecordScreen(modifier: Modifier = Modifier) {
                             Toast.LENGTH_SHORT
                         ).show()
                     } else {
-                        if (launchBubble(context)) {
-                            bubbleOn = true
-                            Toast.makeText(
-                                context,
-                                "悬浮球已显示：切到游戏里点一下开始记录，再点一下结束并保存",
-                                Toast.LENGTH_LONG
-                            ).show()
+                        // 首次开悬浮球先问一次「使用情况访问」（v1.9.3）。
+                        //
+                        // 帧记录要按当前前台应用去找 layer，没这个权限时 FPSGO / GED
+                        // 拿不到进程，SurfaceFlinger 也匹配不到对应的层，帧率容易读空。
+                        // 这个权限没有运行时弹窗，只能把人送到系统设置页，所以放在
+                        // 真正要用它之前问，比埋在设置深处更容易被找到。
+                        //
+                        // 已经问过一次就不再打扰：无论当时同意还是拒绝，都记住这个状态
+                        if (!usageAccessAsked && !hasUsageAccess(context)) {
+                            usageAccessAsked = true
+                            showUsageAccessDialog = true
+                        } else {
+                            usageAccessAsked = true
+                            if (launchBubble(context)) {
+                                bubbleOn = true
+                                Toast.makeText(
+                                    context,
+                                    "悬浮球已显示：切到游戏里点一下开始记录，再点一下结束并保存",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }
                     }
                 }
             )
+        }
+    }
+
+    if (showUsageAccessDialog) {
+        UsageAccessDialog(
+            onConfirm = {
+                showUsageAccessDialog = false
+                // 先把球拉起来再跳设置页：授权过程可能要去别的界面翻几下，
+                // 等回来再拉就多一步。授权结果下一拍采样自然会用上
+                if (launchBubble(context)) {
+                    bubbleOn = true
+                }
+                openUsageAccessSettings(context)
+            },
+            onDismiss = {
+                // 拒绝也照样放行：帧率有同步通道兜着，不让一个可选权限拦住主功能
+                showUsageAccessDialog = false
+                if (launchBubble(context)) {
+                    bubbleOn = true
+                }
+            }
+        )
+    }
+}
+
+/**
+ * 「使用情况访问」授权说明弹窗。
+ *
+ * 说清楚「要这个是为了什么、不给会怎样」——只写「需要权限」用户根本不知道去哪开。
+ */
+@Composable
+private fun UsageAccessDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("需要「使用情况访问」权限", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Text(
+                "帧记录要按当前前台应用去匹配帧率数据，系统要求先授予「使用情况访问」。\n" +
+                        "\n" +
+                        "点「去授权」会打开系统设置页，在列表里找到本应用并允许。\n" +
+                        "不给也能用，只是帧率来源会少几路。",
+                fontSize = 13.sp,
+                lineHeight = 19.sp
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("去授权") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("暂不") }
+        }
+    )
+}
+
+/** 有没有「使用情况访问」 */
+private fun hasUsageAccess(context: Context): Boolean =
+    com.jj.nexusfloat.stats.UsageStatsReader.hasPermission(context)
+
+/** 跳系统的「使用情况访问」设置页 */
+private fun openUsageAccessSettings(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (t: Throwable) {
+        // 个别精简 ROM 没这个页面，退回应用详情页让用户自己找
+        try {
+            context.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(android.net.Uri.parse("package:" + context.packageName))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (ignored: Throwable) {
+            Toast.makeText(context, "打不开设置页，请手动到权限管理里开启", Toast.LENGTH_LONG)
+                .show()
         }
     }
 }

@@ -386,6 +386,18 @@ public final class FrameBubble {
         return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 
+    /**
+     * 按比例调一个 ARGB 色的不透明度。
+     *
+     * alpha 是 0~1 的比例，0.8 就是「80% 不透明」即 20% 透明。
+     * 直接改 Paint 的 alpha 也行，但底色是常量、每次绘制都要重算，
+     * 折成颜色本身更省事，也不用在每帧里多调一次 setAlpha。
+     */
+    private static int withAlpha(int argb, float alpha) {
+        int a = Math.round(255f * (alpha < 0f ? 0f : (alpha > 1f ? 1f : alpha)));
+        return (argb & 0x00FFFFFF) | (a << 24);
+    }
+
     private int dp(float v) {
         return Math.round(v * context.getResources().getDisplayMetrics().density);
     }
@@ -446,9 +458,11 @@ public final class FrameBubble {
             float bgInset = dp(2);
 
             bg.setStyle(Paint.Style.FILL);
+            // 背景 20% 透明（v1.9.3）：压住游戏画面时不会那么扎眼，
+            // 同时底色区分「在记 / 没在记」仍然一眼可辨
             bg.setColor(recording
-                    ? Constants.Frame.BUBBLE_RECORDING_COLOR
-                    : Constants.Frame.BUBBLE_IDLE_COLOR);
+                    ? withAlpha(Constants.Frame.BUBBLE_RECORDING_COLOR, 0.8f)
+                    : withAlpha(Constants.Frame.BUBBLE_IDLE_COLOR, 0.8f));
             canvas.drawRoundRect(
                     bgInset, bgInset, w - bgInset, h - bgInset,
                     corner - bgInset, corner - bgInset, bg);
@@ -461,17 +475,12 @@ public final class FrameBubble {
             String label = fps >= 0f
                     ? String.format(java.util.Locale.US, "%.1f", fps)
                     : "--";
-            // 字号自适应，绝不超出胶囊：
-            // 先按一个基准字号量出文本宽度，等比缩到可用宽度以内；
-            // 再用可用高度封顶，免得字号大到顶穿上下边。
-            // 可用区域是球宽/高各扣掉左右各 3dp 的内边距
-            float availW = w - dp(6);
-            float availH = h - dp(6);
+            // 固定 12dp，不再按文本宽度缩放（v1.9.3）。
+            //
+            // 原来会等比缩小以塞进胶囊，结果 60.0 和 144.0 字号不一样、一眼扫过去
+            // 大小不齐。12dp 是实测能同时容纳三位数加小数点的下限，胶囊本身
+            // （52 × 29dp）已经为它留够了余量，所以不需要再缩
             text.setTextSize(dp(12));
-            float measured = text.measureText(label);
-            float fitByWidth = measured > 0f ? text.getTextSize() * availW / measured : dp(12);
-            float fitByHeight = availH * 0.72f;
-            text.setTextSize(Math.min(fitByWidth, fitByHeight));
 
             float cx = w / 2f;
             float cy = h / 2f;

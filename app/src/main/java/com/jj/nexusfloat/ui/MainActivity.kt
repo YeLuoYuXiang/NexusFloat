@@ -2869,6 +2869,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.3",
+        "修复悬浮窗在三星等系统上出现的重影问题：这些系统会按需拉起 " +
+                "com.android.systemui:multiwindowui 从进程，该进程同样被注入，于是出现两个 " +
+                "同名悬浮窗同时渲染。现在只在主 SystemUI 进程注入，同时为窗口操作补上状态机，" +
+                "避免添加与移除交叉执行。首次开启帧记录悬浮球时提示授予「使用情况访问」权限。" +
+                "悬浮球字号固定，背景调整为 20% 透明。"
+    ),
+    ChangelogEntry(
         "1.9.2",
         "优化记录页的信息呈现：汇总指标支持换行显示，不再被截断；CPU 频率曲线按各簇分线绘制，能看出不同核心的频率差异。记录页的帧率数据与状态栏悬浮条保持同步。设备信息中的安卓版本简化为主版本号。调整悬浮球字号与初始位置，改善横屏下的显示效果。"
     ),

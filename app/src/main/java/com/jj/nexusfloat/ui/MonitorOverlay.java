@@ -60,8 +60,32 @@ public final class MonitorOverlay {
 
     /** 为 true 时监视器是调用方以子 View 形式加进状态栏的，本类只切 visibility */
     private boolean fallbackMode;
-    /** 悬浮窗这会儿 addView 了没有 */
-    private boolean added;
+    /**
+     * 窗口状态机的瞬态。
+     *
+     * IDLE      稳态，不在添加也不在移除
+     * ADDING    addToWindow() 执行中
+     * REMOVING  removeFromWindow() 执行中
+     *
+     * 只有 IDLE 才允许 evaluate() 触发新的 add / remove。add 和 remove 都是异步的，
+     * 布尔标志无法表达"正在进行中"这个中间态——PiP 切换时 evaluate() 会被轮询和
+     * ACTION_CONFIGURATION_CHANGED 广播两条路径同时驱动，两边都读到"未添加"就各自
+     * 走一次 addView，SurfaceFlinger 里留下两个 token，合成后就是重影。
+     */
+    private static final int STATE_IDLE = 0;
+    private static final int STATE_ADDING = 1;
+    private static final int STATE_REMOVING = 2;
+    private int windowState = STATE_IDLE;
+
+    /**
+     * 窗口当前是否真实存在（稳态）。
+     *
+     * 跟 windowState 分开是有意的：后者的 IDLE 只表示"没有正在进行的操作"，
+     * 不代表窗口一定在。isShowing() 和 syncModuleFlags() 要的是"在不在"，
+     * evaluate() 的并发保护要的是"能不能动手"，混用一个变量会让 isShowing()
+     * 在窗口从未添加成功时也返回 true。
+     */
+    private boolean attached;
     /** watch 循环在不在跑 */
     private boolean watching;
     /** 上次已经通知给模块进程的采集状态，免得每秒重复下发同一条指令 */
@@ -153,7 +177,7 @@ public final class MonitorOverlay {
     }
 
     public boolean isShowing() {
-        return added;
+        return attached;
     }
 
     /**
@@ -167,14 +191,24 @@ public final class MonitorOverlay {
                 : dp2px(Constants.Ui.MONITOR_BAR_HEIGHT_DP);
         for (int type : Constants.Overlay.WINDOW_TYPES) {
             params = buildParams(type, height);
+            // View 已有 parent 说明窗口其实已经在，别再 add 一次
+            if (content.getParent() != null) {
+                attached = true;
+                windowState = STATE_IDLE;
+                LogUtils.i("MonitorOverlay already attached, skip add for type " + type);
+                return true;
+            }
+            windowState = STATE_ADDING;
             try {
                 windowManager.addView(content, params);
-                added = true;
+                attached = true;
+                windowState = STATE_IDLE;
                 LogUtils.i("MonitorOverlay added with window type " + type);
                 return true;
             } catch (Throwable t) {
                 // 把异常类名和消息带上：BadTokenException 说明窗口类型不被放行，
                 // SecurityException 说明缺权限，这俩的对策完全不一样
+                windowState = STATE_IDLE;
                 LogUtils.w("MonitorOverlay addView failed for type " + type
                         + ": " + t.getClass().getSimpleName() + ": " + t.getMessage(), t);
             }
@@ -216,10 +250,17 @@ public final class MonitorOverlay {
             if (monitorView != null) {
                 monitorView.setCollecting(shouldShow);
             }
-        } else if (shouldShow && !added) {
-            addToWindow();
-        } else if (!shouldShow && added) {
-            removeFromWindow();
+        } else if (shouldShow && !attached) {
+            // ADDING / REMOVING 期间静默跳过：两条驱动路径（每秒轮询 +
+            // ACTION_CONFIGURATION_CHANGED 广播）可能同时进来，非稳态时动手
+            // 就是重影的来源
+            if (windowState == STATE_IDLE) {
+                addToWindow();
+            }
+        } else if (!shouldShow && attached) {
+            if (windowState == STATE_IDLE) {
+                removeFromWindow();
+            }
         }
 
         // 无条件同步，不放在上面的状态迁移分支里：开机后要是当前方向本来就关着，
@@ -334,7 +375,7 @@ public final class MonitorOverlay {
         // 位置偏移改的是窗口参数不是 View 内容，所以单独判断——它不需要重新测量，
         // 但同样得 updateViewLayout 才会生效
         changed |= applyOffset();
-        if (changed && added && params != null && windowManager != null) {
+        if (changed && attached && params != null && windowManager != null) {
             // 窗口宽高都是 WRAP_CONTENT，内容变了得 updateViewLayout 才会重新测量
             try {
                 windowManager.updateViewLayout(content, params);
@@ -457,31 +498,55 @@ public final class MonitorOverlay {
 
     private void addToWindow() {
         if (windowManager == null || content == null) {
+            windowState = STATE_IDLE;
+            return;
+        }
+        // 幂等：View 已有 parent 是物理事实，比任何标志位都可靠。
+        // 即便状态机被异常路径带偏，这一条也能拦住重复 add
+        if (content.getParent() != null) {
+            attached = true;
+            windowState = STATE_IDLE;
             return;
         }
         if (params == null) {
             params = buildParams(Constants.Overlay.WINDOW_TYPES[0],
                     dp2px(Constants.Ui.MONITOR_BAR_HEIGHT_DP));
         }
+        windowState = STATE_ADDING;
         try {
             windowManager.addView(content, params);
-            added = true;
+            attached = true;
         } catch (Throwable t) {
             LogUtils.w("MonitorOverlay re-add failed", t);
+        } finally {
+            windowState = STATE_IDLE;
         }
     }
 
     private void removeFromWindow() {
-        if (!added || content == null || windowManager == null) {
-            added = false;
+        if (content == null || windowManager == null) {
+            attached = false;
+            windowState = STATE_IDLE;
             return;
         }
+        // 幂等：没有 parent 说明本来就不在窗口里
+        if (content.getParent() == null) {
+            attached = false;
+            windowState = STATE_IDLE;
+            return;
+        }
+        windowState = STATE_REMOVING;
         try {
+            // 用 removeViewImmediate 而不是 removeView：它同步等 View 真正脱离
+            // ViewRootImpl。重影场景下移除必须立刻生效，否则紧接着的 addView
+            // 会与还没退场的旧窗口短暂并存
             windowManager.removeViewImmediate(content);
         } catch (Throwable t) {
             LogUtils.w("MonitorOverlay removeView failed", t);
+        } finally {
+            attached = false;
+            windowState = STATE_IDLE;
         }
-        added = false;
     }
 
     private WindowManager.LayoutParams buildParams(int type, int height) {

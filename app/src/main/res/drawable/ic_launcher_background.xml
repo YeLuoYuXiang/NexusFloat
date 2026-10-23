@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    自适应图标背景层：108dp 画布，蓝色对角渐变。
+    渐变方向与角标一致（左上偏亮、右下压深），使圆形/方形/水滴等各家
+    图标蒙版裁切后都还能看出层次，不会变成一块死板的纯色。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item
+                    android:color="#FF4A90E2"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FF2C6BC4"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FF1E3A8A"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

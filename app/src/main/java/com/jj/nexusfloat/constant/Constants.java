@@ -2121,7 +2121,7 @@ public final class Constants {
          * 详情页汇总卡的平均帧率/最低帧率/峰值功率等全部错位。
          * 升级时在 onUpgrade 里把已存记录逐条重算一遍（见 FrameRecordStore）。
          */
-        public static final int DB_VERSION = 2;
+        public static final int DB_VERSION = 3;
         /** 明细保留天数。1 秒一个点很占地：一小时 3600 行，留 30 天足够回看 */
         public static final int SAMPLE_RETENTION_DAYS = 30;
 
@@ -2168,10 +2168,20 @@ public final class Constants {
 
         // ---- 悬浮球 ----
 
-        /** 悬浮球宽（胶囊长轴）。原来是 52dp 圆，现改成更小一点的长方形 */
-        public static final int BUBBLE_WIDTH_DP = 44;
-        /** 悬浮球高（胶囊短轴）。宽 44 / 高 22 就是圆角 11dp 的胶囊 */
-        public static final int BUBBLE_HEIGHT_DP = 22;
+        /**
+         * 悬浮球宽（胶囊长轴）。
+         *
+         * 球上要显示一位小数的帧率（比如 144.0），原来的 44dp 塞不下这么大的字号，
+         * 所以宽度跟着高度一起放大。52dp 配 29dp 高是圆角 14.5dp 的胶囊。
+         */
+        public static final int BUBBLE_WIDTH_DP = 52;
+        /**
+         * 悬浮球高（胶囊短轴）。
+         *
+         * 比原版 22dp 高 30% 左右（22 × 1.3 ≈ 28.6）。加高的目的是让帧率数字能
+         * 用更大的字号，横屏远看也能认出来；宽度同步放大保持胶囊比例。
+         */
+        public static final int BUBBLE_HEIGHT_DP = 29;
         /** 未记录时的棕黄色。取暗金（DarkGoldenrod）：够「棕黄」，压在浅色游戏画面上也看得清 */
         public static final int BUBBLE_IDLE_COLOR = 0xFFB8860B;
         /** 记录中的红色 */

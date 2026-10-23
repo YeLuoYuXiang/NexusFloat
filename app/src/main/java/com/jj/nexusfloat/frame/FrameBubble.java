@@ -309,9 +309,12 @@ public final class FrameBubble {
                     clamp01(oldX / (float) Math.max(1, maxX)),
                     clamp01(oldY / (float) Math.max(1, maxY))};
         }
-        // 没存过：贴右边但留 12dp 边距，纵向 28%
+        // 没存过：贴右边但留出足够边距，纵向 28%。
+        //
+        // 原来留 12dp，横屏时球会顶到屏幕最右边（甚至被状态栏图标压住）；
+        // 球本身又加宽了，边距得跟着放大。40dp 在竖屏和横屏下都留得出余量
         float fx = maxX > 0
-                ? Math.max(0f, (maxX - dp(12f)) / (float) maxX)
+                ? Math.max(0f, (maxX - dp(40f)) / (float) maxX)
                 : DEFAULT_FX;
         return new float[]{fx, DEFAULT_FY};
     }
@@ -396,11 +399,9 @@ public final class FrameBubble {
     private final class BallView extends View {
 
         private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         private boolean recording;
         private float fps;
-        private boolean ringOn = true;
 
         /** 手势状态 */
         private float downRawX;
@@ -410,16 +411,6 @@ public final class FrameBubble {
         private boolean dragging;
         private boolean longPressFired;
 
-        private final Runnable pulse = new Runnable() {
-            @Override
-            public void run() {
-                ringOn = !ringOn;
-                invalidate();
-                if (recording) {
-                    main.postDelayed(this, Constants.Frame.BUBBLE_PULSE_MS);
-                }
-            }
-        };
 
         private final Runnable longPress = new Runnable() {
             @Override
@@ -439,17 +430,9 @@ public final class FrameBubble {
         }
 
         void setState(boolean recording, float fps) {
-            boolean started = recording && !this.recording;
             this.recording = recording;
             this.fps = fps;
-            main.removeCallbacks(pulse);
-            if (recording) {
-                // 只有「开始」那一下才重置闪烁相位，中途的帧率刷新别把节奏打断
-                if (started) {
-                    ringOn = true;
-                }
-                main.postDelayed(pulse, Constants.Frame.BUBBLE_PULSE_MS);
-            }
+            // 闪烁已经去掉，这里不再安排脉冲任务
             invalidate();
         }
 
@@ -470,28 +453,26 @@ public final class FrameBubble {
                     bgInset, bgInset, w - bgInset, h - bgInset,
                     corner - bgInset, corner - bgInset, bg);
 
-            if (recording && ringOn) {
-                ring.setColor(Constants.Frame.BUBBLE_RECORDING_COLOR);
-                ring.setStyle(Paint.Style.STROKE);
-                ring.setStrokeWidth(dp(2));
-                // 描边沿矩形外沿走一圈；半描边内收避免被窗口边缘裁掉
-                float ringInset = dp(1);
-                canvas.drawRoundRect(
-                        ringInset, ringInset, w - ringInset, h - ringInset,
-                        corner - ringInset, corner - ringInset, ring);
-            }
+            // 记录中不再画闪烁描边：原来那圈一明一暗，远看像球在缩放，盯久了累。
+            // 现在状态只靠底色区分（黄色未记录 / 红色记录中），更干净
 
-            float fontSize;
-            String label;
-            if (recording) {
-                fontSize = fps >= 100f ? dp(10) : dp(12);
-                label = fps >= 0f ? String.valueOf(Math.round(fps)) : "--";
-            } else {
-                // 未记录：小字 fps（白色），说明这是个帧率球
-                fontSize = dp(11);
-                label = "fps";
-            }
-            text.setTextSize(fontSize);
+            // 球上统一显示当前帧率，保留一位小数。未记录时那次读到的帧率就是
+            // 当前屏幕的实时值，直接显示比写 "fps" 有用
+            String label = fps >= 0f
+                    ? String.format(java.util.Locale.US, "%.1f", fps)
+                    : "--";
+            // 字号自适应，绝不超出胶囊：
+            // 先按一个基准字号量出文本宽度，等比缩到可用宽度以内；
+            // 再用可用高度封顶，免得字号大到顶穿上下边。
+            // 可用区域是球宽/高各扣掉左右各 3dp 的内边距
+            float availW = w - dp(6);
+            float availH = h - dp(6);
+            text.setTextSize(dp(15));
+            float measured = text.measureText(label);
+            float fitByWidth = measured > 0f ? text.getTextSize() * availW / measured : dp(15);
+            float fitByHeight = availH * 0.72f;
+            text.setTextSize(Math.min(fitByWidth, fitByHeight));
+
             float cx = w / 2f;
             float cy = h / 2f;
             float textY = cy - (text.descent() + text.ascent()) / 2f;

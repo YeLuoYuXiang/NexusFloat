@@ -12,6 +12,7 @@ import android.os.HandlerThread;
 import android.os.SystemClock;
 
 import com.jj.nexusfloat.bridge.NexusBridge;
+import com.jj.nexusfloat.collector.BatteryGauge;
 import com.jj.nexusfloat.collector.CpuTempReader;
 import com.jj.nexusfloat.collector.FpsgoReader;
 import com.jj.nexusfloat.collector.GedKpiReader;
@@ -74,7 +75,14 @@ public final class FrameSampler {
 
     private final Context context;
     private final FrameRecordStore store;
-    private final PowerTracker powerTracker = new PowerTracker();
+    /**
+     * 电池电气量走公共取数类，和监视条共用同一套实现。
+     *
+     * 原来这里自己拿 PowerTracker + getIntProperty 拼了一条，跟监视条口径不一致：
+     * 电流优先问 BatteryManager（部分 ROM 上那是缓存值），方向只看系统充电状态
+     * （插着线永远报充电）。结果监视条上功率正常、帧记录里却是 -- 或者符号反了。
+     */
+    private final BatteryGauge batteryGauge;
     private final SurfaceFlingerFpsReader sfReader = new SurfaceFlingerFpsReader();
     private final TimeStatsFpsReader timeStatsReader = new TimeStatsFpsReader();
     private final FpsgoReader fpsgoReader = new FpsgoReader();
@@ -161,6 +169,7 @@ public final class FrameSampler {
                 (ActivityManager) this.context.getSystemService(Context.ACTIVITY_SERVICE);
         this.batteryManager =
                 (BatteryManager) this.context.getSystemService(Context.BATTERY_SERVICE);
+        this.batteryGauge = new BatteryGauge(this.context);
     }
 
     // ======================= 生命周期 =======================
@@ -915,56 +924,43 @@ public final class FrameSampler {
         s.ramUsedMb = (int) ((mi.totalMem - mi.availMem) / 1024L / 1024L);
     }
 
+    /**
+     * 采功率、电流、电量、电池温度。
+     *
+     * 电气量全部交给 {@link BatteryGauge}——它跟监视条用的是同一套实现，
+     * 保证两边显示的功率对得上（包括插着线但电池在放电时显示负值这一点）。
+     * 电池温度在汇总里要取最大值，所以每拍都记。
+     */
     private void readPower(FrameRecordStore.Sample s) {
-        Intent intent = batteryIntent;
-        int rawMv = intent != null ? intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0) : 0;
-        float voltageV = rawMv / 1000f;
-        if (voltageV < Constants.Battery.VOLTAGE_MIN_V
-                || voltageV > Constants.Battery.VOLTAGE_MAX_V) {
-            voltageV = SysfsReader.direct().readBatteryVoltageV();
-        }
         s.batteryPct = readBatteryPct();
+        s.batteryTemp = readBatteryTempC();
 
-        float currentA = readCurrentA();
-        float power = powerTracker.resolve(currentA, voltageV,
-                () -> SysfsReader.direct().readBatteryPowerW());
-        boolean charging = isCharging();
-        s.powerW = charging ? power : -power;
+        BatteryGauge.Result r = batteryGauge.sample();
+        s.powerW = r.powerW;
     }
 
-    private float readCurrentA() {
-        if (batteryManager != null) {
-            try {
-                int raw = batteryManager.getIntProperty(
-                        BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
-                if (raw != 0 && raw != Integer.MIN_VALUE) {
-                    float a = SysfsReader.parseScaled(String.valueOf(raw),
-                            Constants.Battery.CURRENT_DIVISORS,
-                            Constants.Battery.CURRENT_MIN_A,
-                            Constants.Battery.CURRENT_MAX_A);
-                    if (a > 0f) {
-                        return a;
-                    }
+    /**
+     * 电池温度（℃），读不到返回 NaN。
+     *
+     * 电池广播的 EXTRA_TEMPERATURE 单位是 0.1℃，最省事；广播还没到就退回 sysfs
+     * 的 power_supply temp 节点。返回 NaN 而不是 0——0℃ 是合法温度，混进去会把
+     * 汇总里的最高温算错。
+     */
+    private float readBatteryTempC() {
+        Intent intent = batteryIntent;
+        if (intent != null) {
+            int tenths = intent.getIntExtra(
+                    BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+            if (tenths != Integer.MIN_VALUE) {
+                float c = tenths / 10f;
+                if (c > Constants.Thermal.TEMP_MIN_C && c < Constants.Thermal.TEMP_MAX_C) {
+                    return c;
                 }
-            } catch (Throwable t) {
-                LogUtils.w(TAG + " getIntProperty failed", t);
             }
         }
-        float direct = SysfsReader.direct().readBatteryCurrentA();
-        if (direct > 0f) {
-            return direct;
-        }
-        // root 直读收尾。连续失败就不再试：没 root 的机器每拍起一次 su 会把采样拖死
-        if (rootMisses < 3) {
-            float viaRoot = SysfsReader.root().readBatteryCurrentA();
-            if (viaRoot > 0f) {
-                rootMisses = 0;
-                return viaRoot;
-            }
-            rootMisses++;
-        }
-        return 0f;
+        return Float.NaN;
     }
+
 
     private boolean isCharging() {
         Intent intent = batteryIntent;

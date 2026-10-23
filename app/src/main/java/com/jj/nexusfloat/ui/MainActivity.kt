@@ -1196,8 +1196,8 @@ private enum class MainTab(val title: String, val icon: String) {
     STATUS("状态", "◉"),
     /** 充电曲线 + 使用统计 + 设置：只读看板，跟「调开关」分开放 */
     STATS("统计", "▤"),
-    /** 帧率记录：设备信息 + 历史记录 + 悬浮球开关，一页看完 */
-    FRAMES("帧记录", "▢"),
+    /** 记录：设备信息 + 历史记录 + 悬浮球开关，一页看完 */
+    FRAMES("记录", "▢"),
     /** 监视项目 + 外观与校正：「显示什么」和「长什么样」搁一起才顺手 */
     MODULES("项目", "☰"),
     /** FPS 来源：六个开关加预设，独占一页 */
@@ -2866,6 +2866,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.1",
+        "帧记录的功率读数修好了：原来它自己拿 BatteryManager 的 current_now 拼功率，" +
+                "那个接口在部分 ROM 上给的是缓存值，方向又只看系统充电状态（插着线永远" +
+                "说在充电），所以曲线里的功率经常是 -- 或符号反了。现在电气量走新抽出来的" +
+                "BatteryGauge，跟监视条同一套实现。悬浮球加高 30%、球上直接显示帧率" +
+                "（一位小数）、去掉闪烁描边、初始位置往左挪；页签「帧记录」改名「记录」；" +
+                "汇总改两排八格，温度曲线换成 CPU + 电池。"
+    ),    ChangelogEntry(
         "1.9.0",
         "并入上游的「统计」与「帧记录」两套功能，底部页签从三个扩到五个。" +
                 "统计页后台定时采电池，能看充电曲线、充入电量、充电时长和各应用" +

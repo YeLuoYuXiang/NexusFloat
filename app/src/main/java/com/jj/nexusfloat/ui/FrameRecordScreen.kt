@@ -106,6 +106,8 @@ private val FrameRamColor = Color(0xFF8B5CF6)
 private val FrameBatteryColor = BatteryColor
 private val FrameTempCpuColor = TempColor
 private val FrameTempGpuColor = PowerColor
+/** 电池温度曲线：用绿色跟 CPU 的橙色区分开 */
+private val FrameTempBatteryColor = Color(0xFF16A34A)
 
 /** 一屏要展示的数据，一次 IO 装齐 */
 private class FrameListData(
@@ -1049,69 +1051,65 @@ private fun RemarkCard(recordId: Long, initial: String) {
 @Composable
 private fun SummaryCard(r: FrameRecordStore.Record) {
     SectionCard(title = "汇总") {
+        // 两排、每排四个。选的是玩家真正会看的八个数：
+        // 第一排看帧率表现，第二排看热和功耗
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MetricTile(
+                title = "最大帧率", value = fpsText(r.maxFps),
+                modifier = Modifier.weight(1f), compact = true
+            )
+            MetricTile(
+                title = "最小帧率", value = fpsText(r.minFps),
+                modifier = Modifier.weight(1f), compact = true
+            )
             MetricTile(
                 title = "平均帧率", value = fpsText(r.avgFps),
                 modifier = Modifier.weight(1f), compact = true
             )
             MetricTile(
-                title = "最高帧率", value = fpsText(r.maxFps),
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "最低帧率", value = fpsText(r.minFps),
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "平均功耗", value = powerText(r.avgPowerW),
+                title = "5% LOW", value = fpsText(r.lowFps5),
                 modifier = Modifier.weight(1f), compact = true
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile(
-                title = "平均 CPU", value = pctText(r.avgCpu),
+                title = "平均 CPU 温",
+                value = if (r.avgCpuTemp > 0f)
+                    String.format(Locale.US, "%.1f°C", r.avgCpuTemp) else "--",
                 modifier = Modifier.weight(1f), compact = true
             )
             MetricTile(
-                title = "平均 GPU", value = pctText(r.avgGpu),
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "峰值 CPU 温",
+                title = "最大 CPU 温",
                 value = if (r.peakCpuTemp > 0f)
                     String.format(Locale.US, "%.1f°C", r.peakCpuTemp) else "--",
                 modifier = Modifier.weight(1f), compact = true
             )
             MetricTile(
-                title = "峰值 GPU 温",
-                value = if (r.peakGpuTemp > 0f)
-                    String.format(Locale.US, "%.1f°C", r.peakGpuTemp) else "--",
+                title = "最大电池温",
+                value = if (r.peakBatteryTemp > 0f)
+                    String.format(Locale.US, "%.1f°C", r.peakBatteryTemp) else "--",
+                modifier = Modifier.weight(1f), compact = true
+            )
+            MetricTile(
+                title = "平均功率", value = powerText(r.avgPowerW),
                 modifier = Modifier.weight(1f), compact = true
             )
         }
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MetricTile(
-                title = "总时间",
-                value = fmtDuration(r.durationMs(System.currentTimeMillis())),
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "电量变化",
-                value = if (r.batteryStart >= 0 && r.batteryEnd >= 0)
-                    "${r.batteryStart}% → ${r.batteryEnd}%" else "--",
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "峰值功率", value = powerText(r.peakPowerW),
-                modifier = Modifier.weight(1f), compact = true
-            )
-            MetricTile(
-                title = "采样点", value = "${r.sampleCount} 个",
-                modifier = Modifier.weight(1f), compact = true
-            )
-        }
+        // 元信息单独一行小字：它们不是性能指标，不该跟上面八个抢眼
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = buildString {
+                append("时长 ").append(fmtDuration(r.durationMs(System.currentTimeMillis())))
+                if (r.batteryStart >= 0 && r.batteryEnd >= 0) {
+                    append("　电量 ").append(r.batteryStart).append("% → ")
+                        .append(r.batteryEnd).append("%")
+                }
+                append("　").append(r.sampleCount).append(" 个采样点")
+            },
+            fontSize = 10.sp,
+            color = MdThemeOnSurfaceVariant
+        )
     }
 }
 
@@ -1271,11 +1269,14 @@ private fun DetailCharts(samples: List<FrameRecordStore.Sample>) {
         }
     }
 
-    // ---- 温度：CPU/GPU 两条线。没读到的画断点（null），不编数 ----
+    // ---- 温度：CPU 和电池两条线。没读到的画断点（null），不编数 ----
+    //
+    // GPU 温度在多数机型上只有一个粗粒度的 zone，读数长时间不动，画成曲线没多少
+    // 信息；电池温度反而是玩家最关心的（手机烫不烫手主要看它），所以换成 CPU + 电池。
     SectionCard(title = "温度 (°C)") {
         val cpu = samples.map { s -> s.cpuTemp.takeIf { !it.isNaN() } }
-        val gpu = samples.map { s -> s.gpuTemp.takeIf { !it.isNaN() } }
-        val known = cpu.filterNotNull() + gpu.filterNotNull()
+        val battery = samples.map { s -> s.batteryTemp.takeIf { !it.isNaN() } }
+        val known = cpu.filterNotNull() + battery.filterNotNull()
         if (known.isEmpty()) {
             EmptyHint("读不到温度传感器。")
         } else {
@@ -1284,7 +1285,9 @@ private fun DetailCharts(samples: List<FrameRecordStore.Sample>) {
             val step = if (max - min > 25f) 10f else 5f
             val lines = mutableListOf<ChartLine>()
             if (cpu.any { it != null }) lines += ChartLine("CPU", FrameTempCpuColor, cpu)
-            if (gpu.any { it != null }) lines += ChartLine("GPU", FrameTempGpuColor, gpu)
+            if (battery.any { it != null }) {
+                lines += ChartLine("电池", FrameTempBatteryColor, battery)
+            }
             LineChart(
                 lines = lines,
                 leftMin = (Math.floor((min / step).toDouble()) * step).toFloat(),

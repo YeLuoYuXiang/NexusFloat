@@ -66,6 +66,7 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                 + "avg_fps REAL NOT NULL DEFAULT 0,"
                 + "min_fps REAL NOT NULL DEFAULT 0,"
                 + "max_fps REAL NOT NULL DEFAULT 0,"
+                + "low_fps5 REAL NOT NULL DEFAULT 0,"
                 + "avg_power_w REAL NOT NULL DEFAULT 0,"
                 + "peak_power_w REAL NOT NULL DEFAULT 0,"
                 + "avg_cpu REAL NOT NULL DEFAULT 0,"
@@ -74,6 +75,7 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                 + "peak_cpu_temp REAL NOT NULL DEFAULT 0,"
                 + "avg_gpu_temp REAL NOT NULL DEFAULT 0,"
                 + "peak_gpu_temp REAL NOT NULL DEFAULT 0,"
+                + "peak_battery_temp REAL NOT NULL DEFAULT 0,"
                 + "battery_start INTEGER NOT NULL DEFAULT -1,"
                 + "battery_end INTEGER NOT NULL DEFAULT -1,"
                 + "sample_count INTEGER NOT NULL DEFAULT 0,"
@@ -91,6 +93,7 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                 + "gpu_usage INTEGER NOT NULL DEFAULT -1,"
                 + "cpu_temp REAL,"
                 + "gpu_temp REAL,"
+                + "battery_temp REAL,"
                 + "ram_used_mb INTEGER NOT NULL DEFAULT 0,"
                 + "ram_total_mb INTEGER NOT NULL DEFAULT 0,"
                 + "power_w REAL NOT NULL DEFAULT 0,"
@@ -103,6 +106,16 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         // 全部建表语句都带 IF NOT EXISTS，重跑一遍也无害（老版本升级时可能补表）
         onCreate(db);
+        if (oldVersion < 3) {
+            // v3：汇总卡要显示 5% LOW 帧率和最高电池温度。老库没这几列，
+            // 也没有 samples.battery_temp，先补列再整表重算汇总。
+            // CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，所以必须单独 ALTER；
+            // 重复执行会报「列已存在」，逐条吞掉即可
+            addColumnIfMissing(db, T_RECORDS, "low_fps5", "REAL NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, T_RECORDS, "peak_battery_temp", "REAL NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, T_SAMPLES, "battery_temp", "REAL");
+            fixAggregateMisalignment(db);
+        }
         if (oldVersion < 2) {
             // 一次性修复 9.0.0.0 首版的汇总列错位：那版 refreshAggregates 的 SQL
             // 多输出了一列「有效点数」，读取端从 idx1 起整体错位，已经落库的记录
@@ -118,6 +131,21 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
      * 必须复用 onUpgrade 传进来的这个可写连接，不能再调 getWritableDatabase()：
      * 那会在数据库版本升级的事务中途重入，SQLiteOpenHelper 会卡住。
      */
+    /**
+     * 给已存在的表补一列。
+     *
+     * CREATE TABLE IF NOT EXISTS 只在表不存在时建表，加不了列，只能 ALTER。
+     * 重复执行会抛「duplicate column」，说明列已经有了，忽略即可。
+     */
+    private static void addColumnIfMissing(SQLiteDatabase db, String table,
+                                           String column, String type) {
+        try {
+            db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+        } catch (Throwable ignored) {
+            // 列已经在了
+        }
+    }
+
     private void fixAggregateMisalignment(SQLiteDatabase db) {
         List<Long> ids = new ArrayList<>();
         Cursor c = null;
@@ -154,12 +182,22 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
         public float avgFps;
         public float minFps;
         public float maxFps;
+        /**
+         * 5% LOW 帧率。
+         *
+         * 把所有有画面的采样点按帧率升序排，取第 5% 位——意思是「最差的那 5%
+         * 时间里，帧率不高于这个数」。比 minFps 有用：minFps 只要有一帧抽风
+         * 就被拉到个位数，LOW 帧反映的才是体感上的卡顿水平。
+         */
+        public float lowFps5;
         public float avgPowerW;
         public float peakPowerW;
         public float avgCpu;
         public float avgGpu;
         public float avgCpuTemp;
         public float peakCpuTemp;
+        /** 记录期间的最高电池温度（℃）；没采到是 0 */
+        public float peakBatteryTemp;
         public float avgGpuTemp;
         public float peakGpuTemp;
         public int batteryStart;
@@ -190,6 +228,8 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
         /** ℃，读不到是 NaN */
         public float cpuTemp = Float.NaN;
         public float gpuTemp = Float.NaN;
+        /** 电池温度（℃），读不到是 NaN。汇总里要取它的最大值 */
+        public float batteryTemp = Float.NaN;
         public int ramUsedMb;
         public int ramTotalMb;
         /** 电池功率（W），带符号：充电为正、放电为负 */
@@ -249,6 +289,9 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                     }
                     if (!Float.isNaN(s.gpuTemp)) {
                         cv.put("gpu_temp", s.gpuTemp);
+                    }
+                    if (!Float.isNaN(s.batteryTemp)) {
+                        cv.put("battery_temp", s.batteryTemp);
                     }
                     cv.put("ram_used_mb", s.ramUsedMb);
                     cv.put("ram_total_mb", s.ramTotalMb);
@@ -444,9 +487,10 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
     }
 
     private static final String RECORD_COLS =
-            "id,start_ts,end_ts,ongoing,pkg,app_label,avg_fps,min_fps,max_fps,"
+            "id,start_ts,end_ts,ongoing,pkg,app_label,avg_fps,min_fps,max_fps,low_fps5,"
                     + "avg_power_w,peak_power_w,avg_cpu,avg_gpu,avg_cpu_temp,peak_cpu_temp,"
-                    + "avg_gpu_temp,peak_gpu_temp,battery_start,battery_end,sample_count,remark";
+                    + "avg_gpu_temp,peak_gpu_temp,peak_battery_temp,battery_start,battery_end,"
+                    + "sample_count,remark";
 
     private static Record readRecord(Cursor c) {
         Record r = new Record();
@@ -459,18 +503,20 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
         r.avgFps = c.getFloat(6);
         r.minFps = c.getFloat(7);
         r.maxFps = c.getFloat(8);
-        r.avgPowerW = c.getFloat(9);
-        r.peakPowerW = c.getFloat(10);
-        r.avgCpu = c.getFloat(11);
-        r.avgGpu = c.getFloat(12);
-        r.avgCpuTemp = c.getFloat(13);
-        r.peakCpuTemp = c.getFloat(14);
-        r.avgGpuTemp = c.getFloat(15);
-        r.peakGpuTemp = c.getFloat(16);
-        r.batteryStart = c.getInt(17);
-        r.batteryEnd = c.getInt(18);
-        r.sampleCount = c.getInt(19);
-        r.remark = c.isNull(20) ? "" : c.getString(20);
+        r.lowFps5 = c.getFloat(9);
+        r.avgPowerW = c.getFloat(10);
+        r.peakPowerW = c.getFloat(11);
+        r.avgCpu = c.getFloat(12);
+        r.avgGpu = c.getFloat(13);
+        r.avgCpuTemp = c.getFloat(14);
+        r.peakCpuTemp = c.getFloat(15);
+        r.avgGpuTemp = c.getFloat(16);
+        r.peakGpuTemp = c.getFloat(17);
+        r.peakBatteryTemp = c.getFloat(18);
+        r.batteryStart = c.getInt(19);
+        r.batteryEnd = c.getInt(20);
+        r.sampleCount = c.getInt(21);
+        r.remark = c.isNull(22) ? "" : c.getString(22);
         return r;
     }
 
@@ -555,7 +601,8 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
 
     private static final String SAMPLE_COLS =
             "ts,fps,fps_src,cpu_total,cpu_cores,cpu_freqs,gpu_freq,gpu_usage,"
-                    + "cpu_temp,gpu_temp,ram_used_mb,ram_total_mb,power_w,battery_pct";
+                    + "cpu_temp,gpu_temp,battery_temp,ram_used_mb,ram_total_mb,"
+                    + "power_w,battery_pct";
 
     private static Sample readSample(Cursor c) {
         Sample s = new Sample();
@@ -569,10 +616,11 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
         s.gpuUsage = c.getInt(7);
         s.cpuTemp = c.isNull(8) ? Float.NaN : c.getFloat(8);
         s.gpuTemp = c.isNull(9) ? Float.NaN : c.getFloat(9);
-        s.ramUsedMb = c.getInt(10);
-        s.ramTotalMb = c.getInt(11);
-        s.powerW = c.getFloat(12);
-        s.batteryPct = c.getInt(13);
+        s.batteryTemp = c.isNull(10) ? Float.NaN : c.getFloat(10);
+        s.ramUsedMb = c.getInt(11);
+        s.ramTotalMb = c.getInt(12);
+        s.powerW = c.getFloat(13);
+        s.batteryPct = c.getInt(14);
         return s;
     }
 
@@ -698,7 +746,8 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                             + "COALESCE(AVG(cpu_temp),0),"                              // idx8
                             + "COALESCE(MAX(cpu_temp),0),"                              // idx9
                             + "COALESCE(AVG(gpu_temp),0),"                              // idx10
-                            + "COALESCE(MAX(gpu_temp),0)"                               // idx11
+                            + "COALESCE(MAX(gpu_temp),0),"                              // idx11
+                            + "COALESCE(MAX(battery_temp),0)"                           // idx12
                             + " FROM " + T_SAMPLES + " WHERE record_id=?",
                     new String[]{String.valueOf(recordId)});
             ContentValues cv = new ContentValues();
@@ -716,12 +765,52 @@ public final class FrameRecordStore extends SQLiteOpenHelper {
                 cv.put("peak_cpu_temp", c.getFloat(i++));   // idx9
                 cv.put("avg_gpu_temp", c.getFloat(i++));    // idx10
                 cv.put("peak_gpu_temp", c.getFloat(i++));   // idx11
+                cv.put("peak_battery_temp", c.getFloat(i++)); // idx12
             } else {
                 cv.put("sample_count", 0);
             }
+            // 5% LOW 帧率：SQLite 没有百分位函数，单独查一次升序列表取第 5% 位
+            cv.put("low_fps5", queryLowFps5(db, recordId));
             db.update(T_RECORDS, cv, "id=?", new String[]{String.valueOf(recordId)});
         } catch (Throwable t) {
             LogUtils.w(TAG + " refreshAggregates failed", t);
+        } finally {
+            if (c != null) {
+                c.close();
+            }
+        }
+    }
+
+    /**
+     * 算 5% LOW 帧率。
+     *
+     * 只统计有画面的采样点（fps > 0）。按帧率升序取第 ceil(n × 5%) 个：
+     * 样本几十个时这个位置落在最差的一两个点上，跟 minFps 差不多；
+     * 样本上千时它代表「最差 5% 时间的帧率水平」，比 minFps 抗单帧抽风。
+     *
+     * 没有有效样本返回 0，界面上显示成 --。
+     */
+    private static float queryLowFps5(SQLiteDatabase db, long recordId) {
+        Cursor c = null;
+        try {
+            c = db.rawQuery(
+                    "SELECT fps FROM " + T_SAMPLES
+                            + " WHERE record_id=? AND fps>0 ORDER BY fps ASC",
+                    new String[]{String.valueOf(recordId)});
+            int n = c.getCount();
+            if (n <= 0) {
+                return 0f;
+            }
+            int index = (int) Math.ceil(n * 0.05) - 1;
+            if (index < 0) {
+                index = 0;
+            }
+            if (index >= n) {
+                index = n - 1;
+            }
+            return c.moveToPosition(index) ? c.getFloat(0) : 0f;
+        } catch (Throwable t) {
+            return 0f;
         } finally {
             if (c != null) {
                 c.close();

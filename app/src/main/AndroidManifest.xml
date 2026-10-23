@@ -17,6 +17,29 @@
     -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+        统计采样要跨息屏、跨应用一直跑，只能靠前台服务。specialUse 类型没有时长上限；
+        dataSync 从 Android 15 起一天只给 6 小时，对「一直在记」的场景等于没有。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Android 13+ 前台服务的通知要这个权限；不给也只是通知不显示，服务照跑 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        「使用情况访问」。统计页靠它拿到精确的亮屏时长和逐应用前台时长。
+        这是设置里的开关，不是运行时弹窗；没授权时自动退回采样积分的估算值。
+    -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+        帧记录悬浮球：用户点开始后要切到游戏里去，控制球必须能盖在别的应用上面。
+        有 root 时会先试 appops 静默授权，不行再引导到设置页。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:name=".App"
         android:allowBackup="true"
@@ -34,6 +57,36 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            充电与使用统计的采样服务。
+
+            foregroundServiceType 必须写 specialUse，并配一条 subtype 说明用途：
+            Android 14 起前台服务必须声明类型，specialUse 还要求给出具体描述，
+            没有这条属性 startForeground 会直接抛异常。
+        -->
+        <service
+            android:name=".stats.StatsService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="battery_charge_and_usage_statistics" />
+        </service>
+
+        <!--
+            帧率记录的前台服务。用户在记录页点开始后切到游戏里，悬浮球要一直显示、
+            采样要一直跑，所以同样走 specialUse。长按悬浮球收掉时服务退场，
+            记录中的那一条会先保存再退。
+        -->
+        <service
+            android:name=".frame.FrameRecordService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="frame_rate_recording_overlay" />
+        </service>
 
         <provider
             android:name=".service.EarlyInitProvider"

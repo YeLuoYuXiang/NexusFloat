@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备信息卡 · 安卓版本 logo（描边层）。
+    原 SVG 的 #000000 在这里画成纯白，由调用方按主题 tint 成正文色。
+    两个 <circle> 展开成圆弧路径（VectorDrawable 不支持 circle 元素）。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- 头部轮廓 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M43.9011 36H4.09863C5.10208 25.8934 13.6292 18 23.9999 18C34.3706 18 42.8977 25.8934 43.9011 36Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+
+    <!-- 两根天线 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M14 20L10 13M33 20L37 13"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+
+    <!-- 两只眼睛：circle(15,29,2) 与 circle(33,29,2) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13,29a2,2 0 1,0 4,0a2,2 0 1,0 -4,0ZM31,29a2,2 0 1,0 4,0a2,2 0 1,0 -4,0Z" />
+</vector>

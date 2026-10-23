@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
  *
  * 只给联发科方案（APP 模式）用，是 FPSGO 之后的补充路径。非线程安全。
  */
-final class GedKpiReader {
+public final class GedKpiReader {
 
     /** 主正则：匹配包名（com. 或 org. 之类开头），后面跟 fps 数字 */
     private static final Pattern PKG_AND_FPS = Pattern.compile(
@@ -47,7 +47,7 @@ final class GedKpiReader {
      * pkg 是包名，传 null 就没法归属，直接失败；preferRoot 决定优不优先走 root。
      * 找不到或者失败都返回 Constants.Fps.READ_FAILED。
      */
-    float read(String pkg, boolean preferRoot) {
+    public float read(String pkg, boolean preferRoot) {
         if (pkg == null) {
             // GED 的输出是逐进程的，不知道包名就说不清哪一行是前台应用。
             // 硬猜一个（比如取最大值）在后台挂着播放器的时候会报出错的帧率，

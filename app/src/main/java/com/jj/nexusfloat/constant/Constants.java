@@ -1714,6 +1714,14 @@ public final class Constants {
         public static final int STALE_MAX_TICKS = 2;
 
         /**
+         * 统计侧读不到有效功率时最多沿用多少拍。
+         *
+         * 跟 STALE_MAX_TICKS 不是一回事：那个管监视条显示的数字，只求别闪；
+         * 这个管落库的充电曲线，宁可标成未知也别编一个数。40 拍 @15 秒约 10 分钟。
+         */
+        public static final int CHARGE_CARRY_MAX_TICKS = 40;
+
+        /**
          * power_now 连续上报同一个数值多少轮之后就判定为静态值，永久弃用。
          *
          * 真实瞬时功率不可能连续十秒一字不差，所以数值恒定就说明这节点报的是
@@ -1955,10 +1963,253 @@ public final class Constants {
 
         private Overlay() {}
     }
+    /**
+     * 充电与使用统计。
+     *
+     * 两部分数据互相独立：
+     *
+     * 一是充电侧。App 进程按固定周期读一次电池状态，存进 SQLite；插上充电器开始一次
+     * 充电会话，拔掉就收尾并聚合。充电曲线就是这次会话里的采样点序列。
+     *
+     * 二是使用侧。拔电到下次插电之间算一个「放电周期」，里面统计亮屏时长、各应用
+     * 前台时长和应用功耗。前台时长优先问系统的 UsageStatsManager（准，但要有
+     * 「使用情况访问」权限），拿不到就退回采样积分（按采样间隔累加当前前台包）。
+     * 功耗归因只能走采样积分：系统不对外提供逐应用的实时电流。
+     *
+     * 数据全部留在本机数据库里，不联网、不上传。
+     */
+    public static final class Stats {
+
+        // ---- 设置键 ----
+
+        /** 统计总开关；默认开。关掉之后采样线程停跑，已有数据保留 */
+        public static final String KEY_ENABLED = "stats_enabled";
+        public static final String LABEL_ENABLED = "充电与使用统计";
+
+        /**
+         * 采样间隔（秒）。
+         *
+         * 15 秒是个平衡点：再密对曲线形状没多大改善，反而让数据库长得快；
+         * 再疏则一次几分钟的快充只剩十几个点，曲线会明显折线化。
+         */
+        public static final String KEY_INTERVAL_SEC = "stats_interval_sec";
+        public static final String LABEL_INTERVAL_SEC = "采样间隔";
+        public static final int INTERVAL_MIN_SEC = 5;
+        public static final int INTERVAL_MAX_SEC = 120;
+        public static final int INTERVAL_STEP_SEC = 5;
+        public static final int INTERVAL_DEFAULT_SEC = 15;
+
+        /**
+         * 常驻通知开关；默认开。
+         *
+         * 关掉只是把通知隐藏，服务照跑——前台服务没有通知在部分 ROM 上会被直接杀掉，
+         * 所以这里控制的是「显示与否」，不是「服务存在与否」。
+         */
+        public static final String KEY_NOTIFICATION = "stats_notification";
+
+        /** 亮屏时才采样；默认关。开了之后息屏期间不落点，省电但放电曲线会有断点 */
+        public static final String KEY_SCREEN_ON_ONLY = "stats_screen_on_only";
+
+        // ---- 数据库 ----
+
+        public static final String DB_NAME = "nexus_stats.db";
+        /**
+         * 数据库版本。
+         *
+         * v1 → v2：samples 增加 power_known 列，区分「真 0」与
+         * 「读不到/沿用值」。迁移逻辑见 StatsStore#onUpgrade（幂等 ALTER TABLE）。
+         */
+        public static final int DB_VERSION = 2;
+
+        /**
+         * 采样明细保留天数。
+         *
+         * 15 秒一点，一天 5760 点，一行约 60 字节，45 天大约 15MB。
+         * 会话和周期的汇总行永久保留，即使明细被清掉，历史记录页的头部数字也还在。
+         */
+        public static final int SAMPLE_RETENTION_DAYS = 45;
+
+        // ---- 前台服务 ----
+
+        public static final String CHANNEL_ID = "nexusfloat_stats";
+        public static final String CHANNEL_NAME = "充电与使用统计";
+        public static final int NOTIFICATION_ID = 0x4E46;
+        public static final String ACTION_START = Package.MODULE + ".action.STATS_START";
+        public static final String ACTION_STOP = Package.MODULE + ".action.STATS_STOP";
+
+        // ---- 判定阈值 ----
+
+        /**
+         * 一次充电会话至少要有这么多采样点才留存。
+         *
+         * 插上充电器几秒又拔掉（比如插着充电宝试一下）会produce出大量「充了 1%」的
+         * 垃圾记录，把它们挡掉，历史列表才有可读性。
+         */
+        public static final int SESSION_MIN_SAMPLES = 4;
+
+        /** 一次放电周期至少这么长才留存（毫秒），太短的碎片周期没有统计意义 */
+        public static final long PERIOD_MIN_MS = 5 * 60 * 1000L;
+
+        /** 电池标称电压兜底（V）：电压节点读不到时估算容量用 */
+        public static final float VOLTAGE_FALLBACK_V = 4.2f;
+
+        /**
+         * 电量跳变上限（百分点/采样点）。
+         *
+         * 电池百分比是内核按电压曲线查表插值的，经常一个点跳 1–2%，
+         * 但一次跳 10% 以上只可能是温度补偿重算或者节点抖动，当成脏数据丢掉，
+         * 免得充入电量被算成天量。
+         */
+        public static final int LEVEL_JUMP_LIMIT = 12;
+
+        /**
+         * 「充入电量」的估算方式。
+         *
+         * true 用电流积分（Σ I·dt），false 用电量差 × 电池容量。默认电流积分：
+         * 涓流阶段电压掉得快，按容量差算会明显偏小。
+         */
+        public static final boolean CHARGED_BY_CURRENT_INTEGRAL = true;
+
+        /** 汇总页显示的历史条目数上限 */
+        public static final int HISTORY_LIMIT = 60;
+
+        /** 应用榜显示条数上限 */
+        public static final int APP_RANK_LIMIT = 20;
+
+        /**
+         * 详情页（某一次充电 / 某一轮使用周期）的应用榜条数上限。
+         *
+         * 比汇总页多给一些：用户专门点进来，想看的就是「这一轮到底是谁在耗电」，
+         * 只给 20 个会刚好把那些「用了几分钟但吃电很凶」的小应用挡在外面。
+         */
+        public static final int APP_RANK_DETAIL_LIMIT = 30;
+
+        /**
+         * 应用使用时间轴（「草莓塔」）把区间切成多少个时间桶。
+         *
+         * 桶数直接决定每根柱子的宽度：手机竖屏一屏的有效绘图宽度大概 290dp，
+         * 30 个桶约 9.7dp 一列，正好放得下一个 9dp 左右的应用图标而不互相压盖。
+         * 桶数在 SQL 里当常量用（见 StatsStore#queryForegroundBuckets），
+         * 所以它必须是个编译期常量，不能按屏幕宽度算。
+         */
+        public static final int USAGE_TOWER_BUCKETS = 30;
+
+        private Stats() {}
+    }
+
+    /**
+     * 帧率记录。
+     *
+     * 跟统计（Stats）完全分开的原因：两边是两回事。统计是「常年在后台默默记」的
+     * 低频采样（15 秒一个点、只关心电池），帧记录是「用户手动开一次、记一会儿」的
+     * 高频采样（1 秒一个点、关心帧率/CPU/GPU/温度全家桶）。频率差 15 倍、字段几乎
+     * 不重叠，塞进同一个库里只会让「清空统计数据」的语义变得说不清——用户清统计
+     * 大概率不想连帧记录一起没。
+     */
+    public static final class Frame {
+
+        // ---- 数据库 ----
+
+        public static final String DB_NAME = "nexus_frames.db";
+        /**
+         * v1 是 9.0.0.0 首版。v2 修的是 refreshAggregates 的列错位：
+         * 首版 SQL 多输出了一列「有效点数」，读取端从 idx1 起整体错位，
+         * 详情页汇总卡的平均帧率/最低帧率/峰值功率等全部错位。
+         * 升级时在 onUpgrade 里把已存记录逐条重算一遍（见 FrameRecordStore）。
+         */
+        public static final int DB_VERSION = 2;
+        /** 明细保留天数。1 秒一个点很占地：一小时 3600 行，留 30 天足够回看 */
+        public static final int SAMPLE_RETENTION_DAYS = 30;
+
+        /**
+         * 一次记录至少要有这么多采样点才留存。
+         *
+         * 误触悬浮球一两秒就停掉的记录只剩一两个点，画不出曲线也没有统计意义。
+         */
+        public static final int RECORD_MIN_SAMPLES = 5;
+
+        /** 详情页曲线最多画多少个点。超出就按 rowid 取模抽稀（同 StatsStore 的做法） */
+        public static final int CURVE_MAX_POINTS = 3600;
+
+        // ---- 采样 ----
+
+        /** 采样间隔。帧率曲线要能看出掉帧的时刻，1 秒是肉眼可辨的最细粒度下限 */
+        public static final int SAMPLE_INTERVAL_MS = 1000;
+        /** 采样点攒够多少条才批量落库。每秒 fsync 一次太浪费，5 秒一批够了 */
+        public static final int FLUSH_EVERY_TICKS = 5;
+        /**
+         * 前台应用多少毫秒重查一次。
+         *
+         * 查询走 UsageStats（有「使用情况访问」权限时），不便宜，但也不是每秒都要：
+         * 用户记录中途切应用是少数情况，5 秒的延迟对「这条记录主要是谁」没有影响。
+         */
+        public static final long FG_REFRESH_MS = 5000L;
+
+        /**
+         * 上一次读 /proc/stat 超过这么久没更新，基线就当过期作废（毫秒）。
+         *
+         * CPU 占用是相邻两拍做差算的，隔太久的两拍之间夹着一大段没采样的时间，
+         * 算出来的数既不是这一刻的也不是平均值。放宽到 3 秒而不是「等于采样间隔」，
+         * 是为了容忍进程被冻结、调度抖动导致某一拍晚了几百毫秒——那还是相邻两拍。
+         */
+        public static final long CPU_BASELINE_STALE_MS = 3000L;
+
+        /**
+         * 本地读 /proc/stat 连着这么多拍读不到（或者完全没有推进）就换 root 通道。
+         *
+         * 留几拍的缓冲是因为「某一拍读失败」很常见（进程刚被解冻、CPU 全忙），
+         * 一次抖动不值得把 su 拉起来常驻；连着三拍都是空的，就说明这条路本身不通。
+         */
+        public static final int CPU_ROOT_FALLBACK_TROUBLES = 3;
+
+        // ---- 悬浮球 ----
+
+        /** 悬浮球宽（胶囊长轴）。原来是 52dp 圆，现改成更小一点的长方形 */
+        public static final int BUBBLE_WIDTH_DP = 44;
+        /** 悬浮球高（胶囊短轴）。宽 44 / 高 22 就是圆角 11dp 的胶囊 */
+        public static final int BUBBLE_HEIGHT_DP = 22;
+        /** 未记录时的棕黄色。取暗金（DarkGoldenrod）：够「棕黄」，压在浅色游戏画面上也看得清 */
+        public static final int BUBBLE_IDLE_COLOR = 0xFFB8860B;
+        /** 记录中的红色 */
+        public static final int BUBBLE_RECORDING_COLOR = 0xFFE53935;
+        /** 记录中提示环闪烁的周期（毫秒） */
+        public static final long BUBBLE_PULSE_MS = 600L;
+        /** 判定成「点按」而不是「拖动」的最大位移（px） */
+        public static final int BUBBLE_TOUCH_SLOP_PX = 12;
+        /** 长按多少毫秒移除悬浮球 */
+        public static final long BUBBLE_LONG_PRESS_MS = 600L;
+
+        // ---- 前台服务 / 通知 ----
+
+        public static final String CHANNEL_ID = "nexusfloat_frame";
+        public static final String CHANNEL_NAME = "帧率记录";
+        /** 通知 id 别跟 Stats 的 0x4E46 撞上：两个前台服务各占一条 */
+        public static final int NOTIFICATION_ID = 0x4E47;
+        public static final String ACTION_SHOW_BUBBLE = Package.MODULE + ".action.FRAME_SHOW_BUBBLE";
+        public static final String ACTION_STOP = Package.MODULE + ".action.FRAME_STOP";
+
+        // ---- GPU 温度 ----
+
+        /**
+         * thermal zone 的 type 里含这些字样（转小写比较）就当 GPU 温度源。
+         *
+         * 各家叫法不一样：高通是 gpu / gpu0 / kgsl，联发科常见 mali / gpu。按序试，
+         * 命中一个就缓存住。都找不到就返回 NaN，图上画成断点而不是编一个数。
+         */
+        public static final String[] GPU_TYPE_HINTS = {"gpu", "mali", "kgsl", "adreno"};
+
+        private Frame() {}
+    }
 
     /** 后台线程名 */
     public static final class ThreadName {
         public static final String GPU_COLLECTOR = "GpuCollector";
+        /** 电池采样循环 */
+        public static final String STATS_SAMPLER = "StatsSampler";
+        /** 帧率记录采样循环 */
+        public static final String FRAME_SAMPLER = "FrameSampler";
+        /** UsageStats / root 取应用用量的工作线程 */
+        public static final String STATS_USAGE = "StatsUsage";
         public static final String NEXUS_COLLECTOR = "NexusCollector";
         public static final String EXEC_READER = "ExecUtils-reader";
         public static final String COLLECT_SIGNAL = "NexusCollectSignal";

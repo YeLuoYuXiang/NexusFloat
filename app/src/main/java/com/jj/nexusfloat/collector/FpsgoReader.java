@@ -31,7 +31,7 @@ import java.util.List;
  * 这套节点只有联发科有，高通机型必然读不到，所以连续失败就退避重扫，
  * 不至于每秒白跑一遍 su 往返。
  */
-final class FpsgoReader {
+public final class FpsgoReader {
 
     /** 命中过的节点路径，命中之后就不用再遍历候选表了 */
     private String hit;
@@ -57,7 +57,7 @@ final class FpsgoReader {
      * 前台应用当前没在渲染就返回 0；FPSGO 用不了的时候（非联发科、节点被禁用、
      * fstb 关了）返回 Constants.Fps.READ_FAILED。
      */
-    float read(String foregroundPkg) {
+    public float read(String foregroundPkg) {
         if (hit != null) {
             List<String> lines = readLines(hit, hitViaRoot);
             float fps = parse(lines, foregroundPkg);

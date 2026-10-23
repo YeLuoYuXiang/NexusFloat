@@ -15,11 +15,14 @@ import com.jj.nexusfloat.constant.Constants;
  * 次数上限的。数据源彻底失效就回到 0，不能锁死在一个假读数上。
  *
  * 这里不管正负号，符号由外部的充放电状态决定。
+ *
+ * 类和 resolve 都开成 public：统计侧的充电曲线要用同一套突变守卫，
+ * 否则监视条上电流被滤平了，充电记录里却还是那根尖刺，两边对不上。
  */
-final class PowerTracker {
+public final class PowerTracker {
 
     /** 惰性功率来源，真要用的时候才去调，省掉没必要的 sysfs 读取 */
-    interface Source {
+    public interface Source {
         /** 返回功率绝对值（W），读不到就 0 */
         float get();
     }
@@ -36,6 +39,14 @@ final class PowerTracker {
     private int spikeTicks;
 
     /**
+     * 上一次 {@link #resolve} 返回的是不是**本拍新读到/新算出**的值。
+     *
+     * false 表示返回的是沿用的旧值（尖峰守卫/陈旧互顶）或者彻底读不到（0）。
+     * 统计侧据此决定这个采样点要不要标成「未知」——监视条不关心，它只看数字。
+     */
+    private boolean lastFresh;
+
+    /**
      * 按优先级选出这一轮用哪个功率值。
      *
      * currentA 是电流绝对值（A），读不到就传 0；voltageV 是电压。
@@ -44,7 +55,7 @@ final class PowerTracker {
      *
      * 返回功率绝对值（W），没得用就返回 0。
      */
-    float resolve(float currentA, float voltageV, Source powerNow) {
+    public float resolve(float currentA, float voltageV, Source powerNow) {
         float power = fromCurrent(currentA, voltageV);
         if (power <= 0) {
             power = fromPowerNow(powerNow);
@@ -55,6 +66,7 @@ final class PowerTracker {
             // 疑似尖峰就先沿用上次有效值，连着好几拍都这么大才当成真变化
             if (isSpike(power)) {
                 if (++spikeTicks < Constants.Battery.POWER_SPIKE_CONFIRM_TICKS) {
+                    lastFresh = false;
                     return lastValid;
                 }
                 // 连着确认了：接受这个新水平，计数清零
@@ -64,15 +76,27 @@ final class PowerTracker {
             }
             lastValid = power;
             staleTicks = 0;
+            lastFresh = true;
             return power;
         }
 
         if (staleTicks < Constants.Battery.STALE_MAX_TICKS) {
             staleTicks++;
+            lastFresh = false;
             return lastValid;
         }
         lastValid = 0f;
+        lastFresh = false;
         return 0f;
+    }
+
+    /**
+     * 上一次 {@link #resolve} 返回的是不是本拍新读到的值。
+     *
+     * 必须在每次 resolve 之后立刻读，它反映的是「最近一次调用」的结果。
+     */
+    public boolean lastWasFresh() {
+        return lastFresh;
     }
 
     /**

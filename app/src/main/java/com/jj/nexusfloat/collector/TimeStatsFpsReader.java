@@ -42,7 +42,7 @@ import java.util.Map;
  *
  * 非线程安全，只该由采集线程调。
  */
-final class TimeStatsFpsReader {
+public final class TimeStatsFpsReader {
 
     /** 上一次采样：layer 名 → 累计总帧数 */
     private Map<String, Long> baseline;
@@ -77,7 +77,7 @@ final class TimeStatsFpsReader {
     /** 上一次失败卡在哪一步，见 Constants.Fps.SF_FAIL_*；成功时是空串 */
     private String lastFailure = "";
 
-    boolean lastViaRoot() {
+    public boolean lastViaRoot() {
         return lastViaRoot;
     }
 
@@ -97,7 +97,7 @@ final class TimeStatsFpsReader {
      *
      * 返回帧率；画面静止时是 0；用不了或者还在预热阶段返回 Constants.Fps.READ_FAILED。
      */
-    float read(String foregroundPkg, boolean preferRoot) {
+    public float read(String foregroundPkg, boolean preferRoot) {
         if (unavailable()) {
             lastFailure = Constants.Fps.SF_FAIL_NO_TIMESTATS;
             return Constants.Fps.READ_FAILED;

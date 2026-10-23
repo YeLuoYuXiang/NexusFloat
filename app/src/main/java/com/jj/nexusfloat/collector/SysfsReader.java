@@ -487,7 +487,7 @@ public final class SysfsReader {
      *
      * 返回换算后的值，解析不了就是 0。
      */
-    static float parseScaled(String raw, float[] divisors, float min, float max) {
+    public static float parseScaled(String raw, float[] divisors, float min, float max) {
         return parseScaledSigned(raw, divisors, min, max, false);
     }
 
@@ -500,7 +500,7 @@ public final class SysfsReader {
      * 区间判定始终用绝对值——min/max 是按无符号量级定的。返回值按 keepSign
      * 决定带不带原始符号。
      */
-    static float parseScaledSigned(String raw, float[] divisors, float min, float max,
+    public static float parseScaledSigned(String raw, float[] divisors, float min, float max,
                                    boolean keepSign) {
         if (raw == null) {
             return 0f;
@@ -607,7 +607,7 @@ public final class SysfsReader {
      *
      * 解析失败返回 Constants.Fps.FpsResult.INACTIVE。
      */
-    static Constants.Fps.FpsResult parseFpsWithFrames(String raw) {
+    public static Constants.Fps.FpsResult parseFpsWithFrames(String raw) {
         if (raw == null) {
             return Constants.Fps.FpsResult.INACTIVE;
         }

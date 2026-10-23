@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备信息卡 · CPU 型号 logo（底色层）。
+    源图是用户给的 48×48 SVG，这里只保留「品牌色填充」，描边/引脚在
+    ic_dev_cpu_ink.xml 里单独一层——那一层运行时会按当前主题的正文色着色，
+    深浅两套主题下都能看清（源图的黑色描边在深色卡片上会糊成一片）。
+    两层叠起来才等于原图：先铺这层，再把 ink 层盖上去。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- 芯片外框 -->
+    <path
+        android:fillColor="#FF4A90E2"
+        android:pathData="M38 8H10C8.89543 8 8 8.89543 8 10V38C8 39.1046 8.89543 40 10 40H38C39.1046 40 40 39.1046 40 38V10C40 8.89543 39.1046 8 38 8Z" />
+
+    <!-- 芯片内核 -->
+    <path
+        android:fillColor="#FF4A90E2"
+        android:pathData="M30 18H18V30H30V18Z" />
+</vector>

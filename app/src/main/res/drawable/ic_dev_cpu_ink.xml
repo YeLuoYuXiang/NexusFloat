@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备信息卡 · CPU 型号 logo（描边层）。
+    原 SVG 里是 #000000，这里画成纯白，由调用方按主题 tint 成正文色
+    （深色主题下几乎看不见黑描边）。叠在 ic_dev_cpu_accent.xml 上面。
+    12 根引脚原来是带 fill 的退化路径（面积为 0），只有描边有用，这里直接省掉。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M38 8H10C8.89543 8 8 8.89543 8 10V38C8 39.1046 8.89543 40 10 40H38C39.1046 40 40 39.1046 40 38V10C40 8.89543 39.1046 8 38 8Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M30 18H18V30H30V18Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+
+    <!-- 上下左右各三根引脚 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M14.9092 2V8M14.9092 40V46M24 2V8M24 40V46M33.0908 2V8M33.0908 40V46M2 14.9092H8M40 14.9092H46M2 24H8M40 24H46M2 33.0908H8M40 33.0908H46"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="square"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+</vector>

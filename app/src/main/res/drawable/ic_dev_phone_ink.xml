@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备信息卡 · 手机型号 logo（单层）。
+    原 SVG 的线条是 #333、机身上的横线是 #FFF：深色卡片上 #333 基本看不见。
+    这里把整个图形画成纯白一层，由调用方 tint 成正文色；
+    原来那条白色横线改成「把机身下巴挖一个洞」——洞露出的是卡片底色，
+    换主题时自动跟着卡片走，不需要第二层去凑背景色。
+
+    下巴那条路径是把原路径按 strokeWidth/2 = 2 往外扩了一圈画成实心
+    （原图是 fill + stroke，同一个颜色），所以描边单独省掉了。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- 机身下巴，中间挖出 home 指示条 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M6 28H42V42C42 44.2091 40.2091 46 38 46H10C7.79086 46 6 44.2091 6 42V28ZM20 35H28V39H20Z" />
+
+    <!-- 机身外轮廓 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M40 30V6C40 4.89543 39.1046 4 38 4H10C8.89543 4 8 4.89543 8 6V30"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="bevel"
+        android:strokeWidth="4" />
+</vector>

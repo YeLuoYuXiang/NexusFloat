@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设备信息卡 · 安卓版本 logo（底色层）：机器人的绿色头。
+    描边、天线、眼睛在 ic_dev_android_ink.xml 里单独一层，运行时按主题正文色着色。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <path
+        android:fillColor="#FF79CE19"
+        android:pathData="M43.9011 36H4.09863C5.10208 25.8934 13.6292 18 23.9999 18C34.3706 18 42.8977 25.8934 43.9011 36Z" />
+</vector>

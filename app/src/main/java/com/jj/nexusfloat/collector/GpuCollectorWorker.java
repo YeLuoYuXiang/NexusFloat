@@ -123,8 +123,11 @@ public final class GpuCollectorWorker {
     }
 
     private static void tick() {
-        int gpuMhz = GpuRootReader.readFreqMhz();
-        int gpuUsage = GpuRootReader.readUsagePercent();
+        // 一次 su 往返读回两个值（v1.9.4）。分开调要两次往返，
+        // 每秒两次跨进程写管道，累起来就是可观的唤醒开销
+        int[] gpu = GpuRootReader.readBoth();
+        int gpuMhz = gpu[0];
+        int gpuUsage = gpu[1];
 
         // 频率和占用都没变就不写，省点传输开销
         if (gpuMhz == lastPublishedMhz && gpuUsage == lastPublishedUsage) {

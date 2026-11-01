@@ -190,6 +190,39 @@ public final class SysfsReader {
         }
 
         /**
+         * 一次读回 GPU 频率和占用（v1.9.4）。
+         *
+         * 这两个节点在采集循环里总是成对读取。原来各走一次 readFirstLine，
+         * 也就是每拍两次 su 管道往返；合成一次后每拍只往返一次，
+         * 模块进程的 GPU 采集开销直接减半。
+         *
+         * 命中路径都已缓存，所以正常情况走的是「已知路径」的快分支。
+         * 任一路径还没命中（首次运行或节点变了）就退回各自的完整探测，
+         * 行为与原来一致。
+         *
+         * 返回值：[0] 频率 MHz（0 表示读不到），[1] 占用百分比（-1 表示读不到）。
+         */
+        public int[] readGpuBoth() {
+            if (freqHit == null || busyHit == null) {
+                // 有一路还没定位到节点，交给各自的完整流程
+                return new int[]{readGpuFreqMhz(), readGpuUsagePercent()};
+            }
+            String[] values = readAll(new String[]{freqHit, busyHit});
+            int mhz = parseFreqMhz(values[0]);
+            int pct = parseUsagePercent(values[1]);
+            if (mhz <= 0) {
+                // 节点失效，清掉缓存让下一拍重新探
+                freqHit = null;
+            }
+            freqMiss = 0;
+            if (pct < 0) {
+                busyHit = null;
+            }
+            busyMiss = 0;
+            return new int[]{mhz, pct};
+        }
+
+        /**
          * 面板实测 FPS。全部节点都读不到、或者都在静止，返回 0。
          *
          * v1.8.4 把 v1.7.6 那套实测可用的实现恢复了回来。

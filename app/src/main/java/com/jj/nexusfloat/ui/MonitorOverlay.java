@@ -8,6 +8,7 @@ import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
@@ -94,6 +95,25 @@ public final class MonitorOverlay {
     private int signalTicks;
     /** 距上次后台唤醒过了多少轮（v1.8.11） */
     private int wakeElapsedTicks;
+    /** 上次同步设置的时间，用来给 syncModuleFlags 做节流（v1.9.4） */
+    private long lastSettingsSyncMs;
+
+    /**
+     * 显示时机相关开关的本地缓存（v1.9.4）。
+     *
+     * 这些值只有用户在 App 里手动改才会变，原来每拍都走 NexusBridge 跨进程问一遍，
+     * 一秒五六次纯属白烧。现在跟着 syncModuleFlags 的节拍刷新（2 秒一次），
+     * 判定时读字段。
+     *
+     * 实时量（亮屏状态、前台包名、是否在充电）不缓存，仍然每拍现取——
+     * 那些真的会在一秒内变。
+     */
+    private boolean cachedShowOnScreenOff;
+    private boolean cachedChargingOnly;
+    private boolean cachedShowPortrait = true;
+    private boolean cachedShowLandscape = true;
+    private boolean cachedAppFilterEnabled;
+    private java.util.Set<String> cachedWhitelist = java.util.Collections.emptySet();
 
     private final Runnable watchRunnable = new Runnable() {
         @Override
@@ -221,6 +241,9 @@ public final class MonitorOverlay {
 
     private void startWatching() {
         registerConfigReceiver();
+        // 首拍必须真的读一次设置：缓存字段的默认值（比如竖屏显示 = true）
+        // 可能跟用户的实际选择不一致，不刷新会先按默认值显示一两个节拍
+        lastSettingsSyncMs = 0L;
         watching = true;
         evaluate();
         handler.removeCallbacks(watchRunnable);
@@ -340,16 +363,35 @@ public final class MonitorOverlay {
     /**
      * 把 App 端写进 Remote 的模块开关、名称、背景开关、字号和项目间隔下发给 MonitorView。
      * 有变化的话窗口尺寸会跟着变，得触发一次窗口重新测量。
+     *
+     * 这里做了一次节流（v1.9.4）。原来每秒无条件跑一遍，等于每秒十几次
+     * RemotePreferences 跨进程查询——而设置只有用户在 App 里动手时才会变，
+     * 一秒钟的延迟完全无感。现在按 SETTINGS_POLL_MS 拉长间隔，改设置最多晚
+     * 两秒生效，省掉的是持续的 IPC 唤醒。
      */
     private void syncModuleFlags() {
         if (monitorView == null) {
             return;
         }
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastSettingsSyncMs < Constants.Overlay.SETTINGS_POLL_MS) {
+            return;
+        }
+        lastSettingsSyncMs = now;
+
         // 请求刷新设置快照。真正的 query 在后台线程做，这个调用立刻返回。
         // 这是 RemotePreferences 不可用的机型（实测澎湃 OS 4）拿到设置的途径
         PrefsSnapshot.requestRefresh();
-        // Settings.Global 通道：system uid 直接读，很轻，每轮都刷得起
+        // Settings.Global 通道：system uid 直接读，很轻，跟着同一个节流走
         SettingsChannel.refresh(context);
+
+        // 顺手把显示时机相关的开关刷进缓存，避免 shouldShowNow 每秒跨进程问
+        cachedShowOnScreenOff = NexusBridge.isShowOnScreenOff();
+        cachedChargingOnly = NexusBridge.isShowChargingOnly();
+        cachedShowPortrait = NexusBridge.isShowInPortrait();
+        cachedShowLandscape = NexusBridge.isShowInLandscape();
+        cachedAppFilterEnabled = NexusBridge.isAppFilterEnabled();
+        cachedWhitelist = NexusBridge.getWhitelist();
 
         boolean changed = monitorView.setModuleEnabled(NexusBridge.readModuleFlags());
         changed |= monitorView.setModuleNames(NexusBridge.readModuleNames());
@@ -419,18 +461,15 @@ public final class MonitorOverlay {
         // 息屏（灭屏/锁屏）判定：没开「息屏显示」就直接隐藏，
         // 隐藏会一并把采集停掉，省电。开屏状态用 isInteractive 现取，
         // 广播只负责提前触发一次评估，两者不冲突
-        if (!NexusBridge.isShowOnScreenOff() && !isScreenInteractive()) {
+        if (!cachedShowOnScreenOff && !isScreenInteractive()) {
             return false;
         }
         // 仅充电时显示：没在充电就隐藏。这里的「充电」用的是和功率方向同一套判定，
         // 插着 USB 但功耗超过供电、电池在掉电时不算充电
-        if (NexusBridge.isShowChargingOnly()
-                && !PerformanceCollector.isChargingNow(context)) {
+        if (cachedChargingOnly && !PerformanceCollector.isChargingNow(context)) {
             return false;
         }
-        boolean orientationOn = isLandscape()
-                ? NexusBridge.isShowInLandscape()
-                : NexusBridge.isShowInPortrait();
+        boolean orientationOn = isLandscape() ? cachedShowLandscape : cachedShowPortrait;
         return orientationOn && isForegroundAllowed();
     }
 
@@ -460,10 +499,10 @@ public final class MonitorOverlay {
      * 让人以为模块坏了。
      */
     private boolean isForegroundAllowed() {
-        if (!NexusBridge.isAppFilterEnabled()) {
+        if (!cachedAppFilterEnabled) {
             return true;
         }
-        Set<String> whitelist = NexusBridge.getWhitelist();
+        Set<String> whitelist = cachedWhitelist;
         if (whitelist.isEmpty()) {
             return false;
         }

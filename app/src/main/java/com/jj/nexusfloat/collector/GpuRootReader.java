@@ -25,4 +25,16 @@ public final class GpuRootReader {
     public static int readUsagePercent() {
         return SysfsReader.root().readGpuUsagePercent();
     }
+
+    /**
+     * 一次读回频率和占用（v1.9.4）。
+     *
+     * 采集循环里这两个值总是成对取。分开调就是两次 su 管道往返，
+     * 合并成一次能把模块进程的 GPU 采集开销砍掉一半。
+     *
+     * 返回 [频率MHz, 占用%]，读不到分别是 0 和 -1。
+     */
+    public static int[] readBoth() {
+        return SysfsReader.root().readGpuBoth();
+    }
 }

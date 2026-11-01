@@ -2869,6 +2869,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.4",
+        "优化监视条运行时的功耗。开启后相比关闭多出的耗电主要来自三处：帧率同步每秒" +
+                "启动一次系统设置进程、设置项每秒重复跨进程读取、GPU 数据每拍两次 root " +
+                "往返。三处都已改掉，并给 root 读取加了失败熔断。帧率同步改用文件通道，" +
+                "写入不再产生额外进程；设置项读取间隔放宽到两秒；GPU 频率与占用合并为" +
+                "一次读取，数值未变化时不重复刷新柱状图。"
+    ),
+    ChangelogEntry(
         "1.9.3",
         "修复悬浮窗在三星等系统上出现的重影问题：这些系统会按需拉起 " +
                 "com.android.systemui:multiwindowui 从进程，该进程同样被注入，于是出现两个 " +

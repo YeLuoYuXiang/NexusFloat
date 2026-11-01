@@ -835,6 +835,18 @@ public final class Constants {
          * 帧记录读它，保证两处显示的帧率一致。
          */
         public static final String SETTINGS_KEY_FPS_SYNC = "nexusfloat_fps_sync";
+
+        /**
+         * 帧率同步文件的路径。
+         *
+         * 用文件而不是 Settings.Global 的原因：`settings put` 每次都要 fork 一个
+         * Java 程序，而 `echo > file` 是 shell 内建，零 fork。帧率每秒都在跳，
+         * 这条路径的写入开销直接决定监视条的待机功耗。
+         *
+         * 放 /data/local/tmp 是因为两个进程都能通过 su 访问，且不需要动 SELinux
+         * 策略。只有一行文本，不需要持久化保证。
+         */
+        public static final String FPS_SYNC_FILE = "/data/local/tmp/nexusfloat_fps";
         /** 快照文本里的行分隔符和键值分隔符 */
         public static final char SNAPSHOT_LINE_SEP = '\n';
         public static final char SNAPSHOT_KV_SEP = '=';
@@ -1952,6 +1964,17 @@ public final class Constants {
          * 屏幕旋转另有 ACTION_CONFIGURATION_CHANGED 会即时触发。
          */
         public static final long WATCH_INTERVAL_MS = 1000L;
+
+    /**
+     * 设置项的轮询间隔（毫秒）。
+     *
+     * 显示时机（屏幕方向、前台应用、亮灭屏）必须每秒判定，但「用户改了哪些
+     * 开关」不需要——那些只有人手动点才变。原来两者用同一个 1 秒节拍，
+     * 等于每秒十几次跨进程查询，纯属白烧。
+     *
+     * 2 秒的延迟在改设置时完全无感，省下的是持续的 IPC 唤醒。
+     */
+    public static final long SETTINGS_POLL_MS = 2000L;
 
         /**
          * 「需要采集」指令的心跳周期（以 WATCH_INTERVAL_MS 为单位）。

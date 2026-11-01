@@ -106,6 +106,17 @@ public class PerformanceCollector {
     private int lastSuccessfulCpuFreqMaxMhz = 0;
     private int lastSuccessfulCpuFreqMinMhz = 0;
     private int lastSuccessfulGpuUsage = -1;
+    /**
+     * root 通道的失败计数与跳过计数（v1.9.4）。
+     *
+     * SystemUI 里 su 不一定可用。连续失败到这个次数就跳过若干拍，
+     * 只保留低频复探——否则每拍都在起 su、等超时、失败、再退回别的通道。
+     */
+    private static final int ROOT_MISS_LIMIT = 3;
+    private static final int ROOT_SKIP_TICKS = 30;
+    private int rootMissStreak;
+    private int rootSkipLeft;
+
     /** 功率取值状态机：来源优先级、静态值识别与陈旧值上限都在其中 */
     private final PowerTracker powerTracker = new PowerTracker();
     /**
@@ -478,15 +489,61 @@ public class PerformanceCollector {
      *
      * 全都失败就退回上次有效值。
      */
+    /**
+     * GPU 频率与占用。
+     *
+     * v1.9.4 做了两处改动，都是为了压住监视条开着时的额外功耗：
+     *
+     * 1. 频率和占用合成一次 root 往返。原来各调一次 GpuRootReader，
+     *    等于每拍两次 su 管道往返。
+     * 2. su 连续失败就熔断。SystemUI 进程里 su 并不总是可用（SELinux 对
+     *    system_server 类进程管得严），原来每拍都会再试一次，失败后再退回
+     *    跨进程 query 和直读文件。三次尝试乘上每秒一次，全是白烧。
+     *    现在连续失败够次数就跳过 root 那一步，只走剩下的通道，并且每
+     *    若干拍才复探一次。
+     */
     private void collectGpuData(PerformanceData data) {
+        int gpuMhz = 0;
+        int usage = -1;
+
         // 第一优先：SystemUI 侧 root 直读（su 可用即得数）
-        int gpuMhz = GpuRootReader.readFreqMhz();
+        boolean tryRoot = true;
+        if (rootMissStreak >= ROOT_MISS_LIMIT) {
+            rootSkipLeft--;
+            if (rootSkipLeft > 0) {
+                tryRoot = false;
+            } else {
+                // 复探这一拍：重置计数，重新给 su 一次机会
+                rootMissStreak = 0;
+                rootSkipLeft = ROOT_SKIP_TICKS;
+            }
+        }
+        if (tryRoot) {
+            int[] both = GpuRootReader.readBoth();
+            gpuMhz = both[0];
+            usage = both[1];
+            if (gpuMhz > 0 || usage >= 0) {
+                rootMissStreak = 0;
+            } else if (++rootMissStreak >= ROOT_MISS_LIMIT) {
+                rootSkipLeft = ROOT_SKIP_TICKS;
+            }
+        }
+
+        // 第二优先：模块进程写好的值（跨进程）
         if (gpuMhz <= 0) {
             gpuMhz = NexusBridge.getGpuFreqMhz();
         }
+        if (usage < 0) {
+            usage = NexusBridge.getGpuUsage();
+        }
+        // 第三优先：本进程直读（部分机型对 system uid 开放）
         if (gpuMhz <= 0) {
             gpuMhz = SysfsReader.direct().readGpuFreqMhz();
         }
+        if (usage < 0) {
+            usage = SysfsReader.direct().readGpuUsagePercent();
+        }
+
         if (gpuMhz <= 0) {
             gpuMhz = lastSuccessfulGpuFreq;
         } else {
@@ -494,13 +551,6 @@ public class PerformanceCollector {
         }
         data.gpuFreq = gpuMhz;
 
-        int usage = GpuRootReader.readUsagePercent();
-        if (usage < 0) {
-            usage = NexusBridge.getGpuUsage();
-        }
-        if (usage < 0) {
-            usage = SysfsReader.direct().readGpuUsagePercent();
-        }
         if (usage < 0) {
             usage = lastSuccessfulGpuUsage;
         } else {

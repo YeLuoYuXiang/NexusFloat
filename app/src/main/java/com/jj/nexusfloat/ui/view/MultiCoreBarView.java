@@ -36,9 +36,33 @@ public class MultiCoreBarView extends View {
         if (newUsages == null) {
             return;
         }
+        // 值没变就不重绘（v1.9.4）。原来每拍无条件 invalidate()，CPU 空闲时
+        // 读数连续几拍一模一样，白白让 SurfaceFlinger 多合成一帧。柱条是
+        // 带 alpha 的绘制，每次重绘都要重新光栅化
+        if (sameAs(newUsages)) {
+            return;
+        }
         usages.clear();
         usages.addAll(newUsages);
         invalidate();
+    }
+
+    /** 跟当前缓存的数值比一遍，画出来一样就返回 true */
+    private boolean sameAs(List<Float> other) {
+        if (usages.size() != other.size()) {
+            return false;
+        }
+        for (int i = 0; i < usages.size(); i++) {
+            Float a = usages.get(i);
+            Float b = other.get(i);
+            float av = a == null ? 0f : a;
+            float bv = b == null ? 0f : b;
+            // 取整后比较：柱条宽度按像素算，1% 以内的差异画出来看不出区别
+            if ((int) av != (int) bv) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

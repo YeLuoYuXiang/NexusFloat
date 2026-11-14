@@ -377,6 +377,16 @@ public final class NexusBridge {
                 Math.min(Constants.Modules.OFFSET_MAX_PX, px));
     }
 
+    /**
+     * 「显示在屏幕底部」开关：为 true 时悬浮窗以屏幕底部（手势栏那一带）为定位基准。
+     *
+     * 读不到默认 false，也就是老行为——贴屏幕顶端。老版本从没写过这个键，
+     * 升级后必须原样不动，不能让人打开更新就发现监视条跑到下面去了。
+     */
+    public static boolean isAnchorBottom() {
+        return readBool(Constants.Modules.KEY_ANCHOR_BOTTOM, false);
+    }
+
     /** 「仅在选定应用显示」开关；默认关，也就是所有界面都显示 */
     public static boolean isAppFilterEnabled() {
         return readBool(Constants.Modules.KEY_APP_FILTER, false);

@@ -388,26 +388,47 @@ public final class MonitorOverlay {
     /**
      * 应用用户设定的位置偏移。
      *
-     * lp.x / lp.y 是相对 gravity 锚点的偏移量。gravity 是 TOP|CENTER_HORIZONTAL，
-     * 所以 x 正值向右、y 正值向下，正好符合直觉。
+     * lp.x / lp.y 是相对 gravity 锚点的偏移量。锚点由「显示在屏幕底部」开关决定
+     * （见 resolveGravity()）：默认顶端，开了就是底部，水平方向恒为居中。
+     * 两种基准下 x 正值都向右、y 正值都向下，正好符合直觉。
+     *
+     * gravity 也要在这里一起比较和同步，不能只在 buildParams 里定死：用户运行中
+     * 拨开关时窗口不会重建，唯一的生效路径是本方法返回 true 让 syncModuleFlags()
+     * 走到 updateViewLayout。而 gravity 只有在 updateViewLayout 里改才会被
+     * WindowManager 采纳——直接改完 params 不作为是不会生效的。
      *
      * 退化模式下（监视条是状态栏的子 View）没有窗口参数可改，直接跳过——
      * 那种模式本来就受状态栏布局摆布，位置微调无从下手。
      *
-     * 返回偏移有没有变。
+     * 返回「gravity 或偏移」有没有变。
      */
     private boolean applyOffset() {
         if (params == null) {
             return false;
         }
+        int gravity = resolveGravity();
         int x = NexusBridge.getOffsetX();
         int y = NexusBridge.getOffsetY();
-        if (params.x == x && params.y == y) {
+        if (params.gravity == gravity && params.x == x && params.y == y) {
             return false;
         }
+        params.gravity = gravity;
         params.x = x;
         params.y = y;
         return true;
+    }
+
+    /**
+     * 定位基准：默认屏幕顶端，开了「显示在屏幕底部」就换成底部；水平方向恒为居中。
+     *
+     * 抽成一个方法是因为 buildParams()（首次建窗口、旋转后重建）和 applyOffset()
+     * （运行中拨开关）都得用同一个答案，两处各写一份三元表达式迟早会有一处漏改，
+     * 表现就是「开关打开后只有转屏才生效」这种很难复现的问题。
+     */
+    private static int resolveGravity() {
+        return NexusBridge.isAnchorBottom()
+                ? Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                : Gravity.TOP | Gravity.CENTER_HORIZONTAL;
     }
 
     /**
@@ -511,6 +532,13 @@ public final class MonitorOverlay {
         if (params == null) {
             params = buildParams(Constants.Overlay.WINDOW_TYPES[0],
                     dp2px(Constants.Ui.MONITOR_BAR_HEIGHT_DP));
+        } else {
+            // 复用旧 params 前先把 gravity / x / y 刷新一遍：窗口隐藏期间用户可能
+            // 拨了「显示在屏幕底部」或调了位置，旧对象里还带着上次的基准，直接
+            // addView 会让监视条先闪一下旧位置。syncModuleFlags() 每轮虽然也会调
+            // applyOffset()，但它在 monitorView == null 时会提前返回，
+            // 这条路径不能指望它，所以这里再同步一次（幂等，没变就什么都不做）
+            applyOffset();
         }
         windowState = STATE_ADDING;
         try {
@@ -568,10 +596,17 @@ public final class MonitorOverlay {
                 flags,
                 PixelFormat.TRANSLUCENT);
 
-        // 贴屏幕最顶端：y = 0 配合 FLAG_LAYOUT_IN_SCREEN / FLAG_LAYOUT_NO_LIMITS，
-        // 竖屏横屏都紧贴各自方向下的物理屏幕上边缘，不再按状态栏高度居中下移。
-        // x/y 之后会被「位置微调」覆盖，见 applyOffset()
-        lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        // 贴屏幕边：y = 0 配合 FLAG_LAYOUT_IN_SCREEN / FLAG_LAYOUT_NO_LIMITS，
+        // 竖屏横屏都紧贴各自方向下的物理屏幕边缘（默认上边缘，开了「显示在屏幕底部」
+        // 就是下边缘、压在手势栏上），不再按状态栏高度居中下移。
+        // y 的正负方向在两种基准下是一致的（正值向下），但「相对锚点是往屏幕里还是
+        // 往屏幕外」取决于锚点在哪：顶端基准下 y = 0 已经贴着物理屏幕上沿，负值只会
+        // 把窗口推出屏幕外，能用的只有正值（往下挪进屏幕）；底部基准下正好相反，
+        // 负值往上抬离手势栏，正值会把整条推到屏幕下沿之外。
+        // 也就是说两个基准各有一半的取值区间落在可见区之外，界面切换基准时会提示
+        // 这种越界，见 MainActivity#changeAnchorBottom()。
+        // x/y 和 gravity 之后都会被「位置微调」和「显示在屏幕底部」覆盖，见 applyOffset()
+        lp.gravity = resolveGravity();
         lp.x = NexusBridge.getOffsetX();
         lp.y = NexusBridge.getOffsetY();
         lp.windowAnimations = 0;
@@ -582,7 +617,8 @@ public final class MonitorOverlay {
             lp.layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
-        // 脱离系统 insets，才能稳稳停在屏幕最顶部
+        // 脱离系统 insets，才能稳稳停在屏幕最边缘——顶端基准贴物理屏幕上沿，
+        // 底部基准贴物理屏幕下沿（不被导航栏/手势栏的 inset 顶上来）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 lp.setFitInsetsTypes(0);

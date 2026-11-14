@@ -176,6 +176,14 @@ class MainActivity : ComponentActivity() {
      */
     private var anchorBottom by mutableStateOf(false)
     /**
+     * 「防烧屏微移」开关：打开后监视条每隔 45 秒在 ±2px 内随机挪一下，
+     * 让文字笔画老化到不同的子像素上，延缓 OLED 残影。
+     *
+     * 默认 false = 不动，老用户升级后读不到这个键，监视条和现在一模一样。
+     * 微移是能被察觉的「小动作」，默认开着容易被当成渲染抖动。
+     */
+    private var burnInProtect by mutableStateOf(false)
+    /**
      * 「刷新时间」输入框里的文本，不是数值。
      *
      * 存文本是为了让用户能正常键入：输入「1.5」会经过「1」「1.」两个中间态，
@@ -266,6 +274,7 @@ class MainActivity : ComponentActivity() {
         offsetY = readInt(Constants.Modules.KEY_OFFSET_Y, 0)
             .coerceIn(Constants.Modules.OFFSET_MIN_PX, Constants.Modules.OFFSET_MAX_PX)
         anchorBottom = readSwitch(Constants.Modules.KEY_ANCHOR_BOTTOM, default = false)
+        burnInProtect = readSwitch(Constants.Modules.KEY_BURN_IN_PROTECT, default = false)
         intervalText = formatInterval(
             readInt(Constants.Modules.KEY_UPDATE_INTERVAL, Constants.Config.UPDATE_INTERVAL_MS)
                 .coerceIn(
@@ -451,6 +460,8 @@ class MainActivity : ComponentActivity() {
                             onOffsetReset = { resetOffset() },
                             anchorBottom = anchorBottom,
                             onAnchorBottomChange = { enabled -> changeAnchorBottom(enabled) },
+                            burnInProtect = burnInProtect,
+                            onBurnInProtectChange = { enabled -> changeBurnInProtect(enabled) },
                             intervalText = intervalText,
                             onIntervalTextChange = { intervalText = it },
                             onIntervalCommit = { commitInterval() },
@@ -1101,6 +1112,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 防烧屏微移开关。
+     *
+     * 只设状态 + 存盘，不做别的：漂移量是 SystemUI 进程里的瞬态，App 这边根本不知道
+     * 它当前的偏移是多少，也没有必要知道。监视条的 watch 循环每秒会重新读一次这个键
+     * （见 MonitorOverlay#maybeDrift），所以打开后最多 1 秒内开始计时、关掉后最多
+     * 1 秒内回到原位。
+     *
+     * 写盘交给 saveSwitch：它自己会做本地 + RemotePreferences 双写并推整表到
+     * Settings.Global，这里不用再碰任何通道。
+     */
+    private fun changeBurnInProtect(enabled: Boolean) {
+        burnInProtect = enabled
+        saveSwitch(Constants.Modules.KEY_BURN_IN_PROTECT, enabled)
+    }
+
     /** 位置复位到当前定位基准的居中位置 */
     private fun resetOffset() {
         offsetX = 0
@@ -1335,6 +1362,8 @@ fun MainScreen(
     onOffsetReset: () -> Unit,
     anchorBottom: Boolean,
     onAnchorBottomChange: (Boolean) -> Unit,
+    burnInProtect: Boolean,
+    onBurnInProtectChange: (Boolean) -> Unit,
     intervalText: String,
     onIntervalTextChange: (String) -> Unit,
     onIntervalCommit: () -> Unit,
@@ -1495,7 +1524,9 @@ fun MainScreen(
                         onOffsetYSet = onOffsetYSet,
                         onOffsetReset = onOffsetReset,
                         anchorBottom = anchorBottom,
-                        onAnchorBottomChange = onAnchorBottomChange
+                        onAnchorBottomChange = onAnchorBottomChange,
+                        burnInProtect = burnInProtect,
+                        onBurnInProtectChange = onBurnInProtectChange
                     )
                 }
 
@@ -2361,7 +2392,9 @@ fun AppearanceCard(
     onOffsetYSet: (Int) -> Unit,
     onOffsetReset: () -> Unit,
     anchorBottom: Boolean,
-    onAnchorBottomChange: (Boolean) -> Unit
+    onAnchorBottomChange: (Boolean) -> Unit,
+    burnInProtect: Boolean,
+    onBurnInProtectChange: (Boolean) -> Unit
 ) {
     // 快速输入弹窗当前在编辑哪个方向。状态放在卡片顶层而不是塞进 if 分支里：
     // 对话框关掉后这一段重组，写在条件里的 remember 会被回收，再次打开时
@@ -2506,6 +2539,19 @@ fun AppearanceCard(
             checked = anchorBottom,
             onCheckedChange = onAnchorBottomChange,
             description = "打开后以屏幕底部为基准定位，监视条落在系统手势栏那一带；关掉则回到屏幕顶端"
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 防烧屏微移：放在这张卡片的最后——它是「监视条整体怎么摆」这一族的收尾项，
+        // 跟前面的字色字号是两回事，插在中间会打断那段连续的排版调节。
+        // 描述里写清多久、动多少、为了什么：只写「防烧屏」三个字没人知道它在干什么，
+        // 反而容易让人以为开了就不烧屏了
+        ToggleRow(
+            label = Constants.Modules.LABEL_BURN_IN_PROTECT,
+            checked = burnInProtect,
+            onCheckedChange = onBurnInProtectChange,
+            description = "每隔 45 秒在 2 像素内轻微移动监视条，避免文字长期点亮同一批像素造成屏幕残影"
         )
     }
 

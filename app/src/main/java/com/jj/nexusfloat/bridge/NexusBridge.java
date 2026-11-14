@@ -572,6 +572,17 @@ public final class NexusBridge {
         return readBool(Constants.Modules.KEY_ANCHOR_BOTTOM, false);
     }
 
+    /**
+     * 「防烧屏微移」开关：为 true 时监视条每隔 Constants.Modules#BURN_IN_INTERVAL_MS
+     * 在 ±2px 内随机挪一下，轮换点亮的像素，延缓 OLED 上留下残影。
+     *
+     * 读不到默认 false：微移是个能被人眼察觉的「小动作」，默认必须不动，
+     * 免得老用户升级后以为监视条在抖。真正有烧屏顾虑的人才会主动打开。
+     */
+    public static boolean isBurnInProtectEnabled() {
+        return readBool(Constants.Modules.KEY_BURN_IN_PROTECT, false);
+    }
+
     /** 「仅在选定应用显示」开关；默认关，也就是所有界面都显示 */
     public static boolean isAppFilterEnabled() {
         return readBool(Constants.Modules.KEY_APP_FILTER, false);

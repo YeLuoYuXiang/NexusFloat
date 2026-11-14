@@ -507,6 +507,33 @@ public final class Constants {
         public static final String LABEL_ANCHOR_BOTTOM = "显示在屏幕底部";
 
         /**
+         * 防烧屏微移：每隔 BURN_IN_INTERVAL_MS 在 ±BURN_IN_AMPLITUDE_PX 内随机挪一下，
+         * 轮换点亮的像素。
+         *
+         * 为什么需要它：监视条是常驻的固定像素——小字号、高对比、位置一秒不变，
+         * 同一批子像素被长期点亮。OLED 上这就是教科书式的烧屏条件，几个月后屏幕上
+         * 会留下「一个淡淡的监视条」的残影，而且不可逆。
+         *
+         * 为什么是「微移」而不是「隐藏一会儿」或「调低亮度」：后者都会让人真的看不见
+         * 数据，而 2px 的位移在 400+ dpi 的屏幕上几乎察觉不到，却足以让文字的笔画边缘
+         * 落在不同的子像素上，把老化平摊开。
+         *
+         * 为什么 45 秒：OLED 的老化是按累计点亮时长走的，几十秒一轮就够把同一像素的
+         * 占空比打散；更频繁只是徒增 updateViewLayout 的次数，没有额外收益。
+         *
+         * 为什么默认关：老用户升级后读不到这个键就走 false，监视条一动不动，行为
+         * 和升级前一模一样。默认开着的话，那些本来就在盯像素级细节的人会把「文字
+         * 每隔一会儿挪一点」当成渲染 bug 或抖动来报，而这种问题极难解释清楚。
+         * 有烧屏顾虑的人自己打开就行，界面上写清了多久动一次、动多少。
+         */
+        public static final String KEY_BURN_IN_PROTECT = "burn_in_protect";
+        public static final String LABEL_BURN_IN_PROTECT = "防烧屏微移";
+        /** 微移幅度（像素，单边最大值） */
+        public static final int BURN_IN_AMPLITUDE_PX = 2;
+        /** 微移间隔（毫秒） */
+        public static final long BURN_IN_INTERVAL_MS = 45_000L;
+
+        /**
          * CPU / GPU 柱状图开关：在数值旁边画一根占用率竖条。
          *
          * 只给 CPU 和 GPU：这两项是 0–100 的占用率，柱高有明确含义。

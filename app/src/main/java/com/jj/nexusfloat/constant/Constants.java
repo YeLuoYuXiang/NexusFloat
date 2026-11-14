@@ -91,6 +91,18 @@ public final class Constants {
          */
         public static final String KEY_SHOW_CHARGING_ONLY = "show_charging_only";
         public static final String KEY_UPDATED_AT = "updated_at";
+        /**
+         * 设置表的修订号（v1.9.4）。
+         *
+         * 为什么需要它：设置有三条读取通道（RemotePreferences / ContentProvider 快照 /
+         * Settings.Global），三条各自独立演进。读侧原来的优先级是写死的「Remote 最高」，
+         * 而 Remote 只在模块自己的进程被框架注入时才会更新；一旦注入失效，里面留下的
+         * 旧值就会永远压住另外两条通道，表现是「改什么设置都没反应」，而悬浮窗本身照常显示。
+         *
+         * 值是一个毫秒时间戳，由写侧每次发布时盖上，三条通道都带同一份。
+         * 读侧比大小取最新的那一套，比「按固定优先级试」可靠。
+         */
+        public static final String KEY_PREFS_REV = "prefs_rev";
         /** openRemoteFile 备用通道（跟 RemotePreferences 双写） */
         public static final String GPU_FREQ_FILE = "gpu_freq.txt";
 

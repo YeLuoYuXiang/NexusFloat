@@ -2,8 +2,10 @@ package com.jj.nexusfloat.bridge;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Process;
 import android.provider.Settings;
 import android.util.Base64;
+import android.util.Log;
 
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.utils.LogUtils;
@@ -11,6 +13,7 @@ import com.jj.nexusfloat.utils.RootShell;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -29,6 +32,15 @@ import java.util.Map;
  * 不像 GPU 数据那样每秒刷。
  */
 public final class SettingsChannel {
+
+    /**
+     * logcat 里能看到的标签。
+     *
+     * LogUtils 的输出只进 LSPosed 的模块日志，用户抓 logcat 时看不到；写入通道坏掉
+     * 恰恰是最需要用户自己确认的一类问题（有没有 root、settings 命令能不能用），
+     * 所以这里的诊断一律走 android.util.Log，保证 logcat 里抓得到。
+     */
+    private static final String TAG = "NexusFloat";
 
     /** 读侧缓存：整体替换，读的时候不用加锁 */
     private static volatile Map<String, String> values = new HashMap<>();
@@ -72,6 +84,15 @@ public final class SettingsChannel {
             Map<String, String> v = new HashMap<>();
             Map<String, String> t = new HashMap<>();
             parse(text, v, t);
+
+            // 解出来一个键都没有，但原文并不空：这串数据是坏的（被截断、或者 Base64
+            // 解出来是乱码）。这时候绝不能拿空表覆盖上一份好快照——一旦覆盖，所有键都
+            // 变成「这条通道里没有」，读取整体掉到默认值，现象就是「设置全丢、字号回到
+            // 默认」。留着旧数据等下一次写入，比清空安全。
+            if (v.isEmpty() && !text.isEmpty()) {
+                LogUtils.w("SettingsChannel refresh: unparsable blob, keep previous snapshot");
+                return;
+            }
 
             values = v;
             types = t;
@@ -173,7 +194,17 @@ public final class SettingsChannel {
      * 要 root：settings put global 需要 WRITE_SECURE_SETTINGS，普通应用拿不到。
      * 没 root 就静默失败，前两条通道照样能用。
      *
-     * 返回写成功没有。
+     * v1.9.4 起做了两件事，都是为了「写失败不要静默」：
+     * 1. 显式带上 --user。settings 命令不带 --user 时按 current 处理，也就是
+     *    「此刻的前台用户」。用户装在空间/工作资料里、或者写入发生时前台用户正在
+     *    切换，写入就会落到另一个用户的表里，而 SystemUI 读的是它自己那份，永远读不到。
+     *    这里用本进程 uid 推出的用户——写入者的用户和它想影响的 SystemUI 是同一个，
+     *    这比写死 0 准确（有人把模块装在第二空间里用）。
+     * 2. 写完读回校验。原先 execLines 的返回值直接丢掉，命令不存在、被 SELinux 拦、
+     *    空间不足……全都表现为「返回 true，什么都没发生」，用户侧就是「改了没反应」
+     *    而日志里一片安静。现在读回不一致会打一条 logcat 可见的警告。
+     *
+     * 返回写成功、并且读回校验也通过。
      */
     public static boolean publish(Context ctx) {
         if (ctx == null) {
@@ -182,30 +213,71 @@ public final class SettingsChannel {
         try {
             SharedPreferences prefs = ctx.getSharedPreferences(
                     Constants.Remote.PREFS_NAME, Context.MODE_PRIVATE);
-            String text = encode(prefs.getAll());
+            // 盖一个新的修订号再整表编码：读侧靠它判断三条通道里哪一份最新。
+            // apply() 会同步更新内存里的表，紧接着的 getAll() 立刻就能读到，
+            // 不需要 commit() 那次磁盘同步
+            prefs.edit()
+                    .putLong(Constants.Remote.KEY_PREFS_REV, System.currentTimeMillis())
+                    .apply();
+            Map<String, ?> all = prefs.getAll();
+            String text = encode(all);
             String b64 = Base64.encodeToString(
                     text.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
             RootShell shell = RootShell.get();
             if (shell.isDead()) {
                 LogUtils.w("SettingsChannel publish skipped: no root shell");
+                Log.w(TAG, "SettingsChannel: 没有 root，设置无法推到 SystemUI"
+                        + "（Remote / provider 两条通道不受影响）");
                 return false;
             }
             // Base64 只有 ASCII 字母数字和 +/=，但还是加了引号：'+' 在个别 shell
             // 里有特殊含义，而引号是零成本的
-            String cmd = "settings put global " + Constants.Component.SETTINGS_KEY
-                    + " " + RootShell.quote(b64);
+            String target = "--user " + currentUserId() + " global "
+                    + Constants.Component.SETTINGS_KEY;
+            String cmd = "settings put " + target + " " + RootShell.quote(b64);
             // 不能用 exec()：它的默认超时是给读 sysfs 设计的（几百毫秒），
             // 而 settings 命令得起一个 app_process，慢一个数量级
             shell.execLines(cmd, 1, Constants.Component.SETTINGS_WRITE_TIMEOUT_MS);
-            LogUtils.i("SettingsChannel published, " + prefs.getAll().size()
+
+            // 读回校验：这一步是「写失败」唯一的证据来源。settings put 命令本身
+            // 成功退出并不代表值真的落到了 SystemUI 会读的那个位置上
+            List<String> back = shell.execLines(
+                    "settings get " + target, 1, Constants.Component.SETTINGS_WRITE_TIMEOUT_MS);
+            String got = (back == null || back.isEmpty()) ? null : back.get(0);
+            if (!b64.equals(got)) {
+                Log.w(TAG, "SettingsChannel publish 校验失败：写入 " + b64.length()
+                        + " 个 b64 字符（" + all.size() + " 项，user "
+                        + currentUserId() + "），读回 "
+                        + (got == null ? "null（命令没输出，可能没 root 或被拦）"
+                        : got.length() + " 个 b64 字符（内容不一致）")
+                        + "；SystemUI 侧读到的会是旧值");
+                return false;
+            }
+            LogUtils.i("SettingsChannel published, " + all.size()
                     + " keys, " + b64.length() + " b64 chars");
             return true;
         } catch (Throwable t) {
             LogUtils.w("SettingsChannel publish failed", t);
+            Log.w(TAG, "SettingsChannel publish 异常：" + t);
             return false;
         }
     }
+
+    /**
+     * 本进程所在的用户 id。
+     *
+     * 从 uid 反推，不用 UserHandle.getUserId()——它是 @hide 的，公开 SDK 里根本编不过。
+     * Android 的 uid 布局是 user_id * PER_USER_RANGE + app_id（PER_USER_RANGE 恒为
+     * 100000，见 Process.FIRST_APPLICATION_UID 的定义），所以整除就是用户 id：
+     * 主用户是 0，第二空间/XSpace 这类是 999，工作资料是 10，能一视同仁地算出来。
+     */
+    private static int currentUserId() {
+        return Process.myUid() / PER_USER_RANGE;
+    }
+
+    /** Android 里每个用户分到的 uid 区间大小，见 Process.FIRST_APPLICATION_UID */
+    private static final int PER_USER_RANGE = 100000;
 
     /**
      * 往 Settings.Global 写一个独立的键值（不走 prefs 打包）。
@@ -224,7 +296,9 @@ public final class SettingsChannel {
             if (shell.isDead()) {
                 return false;
             }
-            String cmd = "settings put global " + key + " " + RootShell.quote(value);
+            // --user 的理由同 publish()：不带就是「当前前台用户」，可能在空间里
+            String cmd = "settings put --user " + currentUserId() + " global " + key
+                    + " " + RootShell.quote(value);
             shell.execLines(cmd, 1, Constants.Component.SETTINGS_WRITE_TIMEOUT_MS);
             return true;
         } catch (Throwable t) {

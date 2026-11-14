@@ -2,6 +2,8 @@ package com.jj.nexusfloat.bridge;
 
 import android.content.SharedPreferences;
 import android.os.ParcelFileDescriptor;
+import android.util.Log;
+
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.utils.LogUtils;
 
@@ -9,7 +11,9 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import io.github.libxposed.api.XposedModule;
@@ -30,8 +34,35 @@ import io.github.libxposed.api.XposedModule;
  * 而监视条本身还能显示（读不到就用默认值），故障看着像「功能残缺」而不是「通道断了」。
  *
  * 优先级是逐键判断的，不是整体二选一：有些机型几条通道都通，而 Remote 可能只有一部分键。
+ *
+ * v1.9.4 起按「修订号」选通道，不再按固定顺序
+ * 固定顺序（Remote 永远最高）有个致命的失效模式：Remote 只在模块自己的进程被注入时
+ * 才会更新。注入一旦失效（换版本、重置作用域、ROM 更新），Remote 文件里留下的旧值就
+ * 会永久压住另外两条通道——provider 快照和 Settings.Global 里明明是用户刚改的新值，
+ * 读到的却永远是旧的。现象是「改字号/位置/底部开关完全没反应」，而悬浮窗本身照常显示
+ * （它按旧值正常工作），故障看着像某个功能坏了，而不是通道断了。
+ * 现在每次发布设置都会盖一个毫秒时间戳（Constants.Remote#KEY_PREFS_REV），三条通道
+ * 各带一份，读侧比大小取最新的那一套；三条都没有修订号（老版本写下的数据）才退回
+ * 原来的固定顺序，保证非 root 用户走 Remote 的老路径不被破坏。
  */
 public final class NexusBridge {
+
+    /** 诊断日志标签，走 android.util.Log 是为了在 logcat 里抓得到，见 SettingsChannel#TAG */
+    private static final String TAG = "NexusFloat";
+
+    /** 通道编号 */
+    private static final int CHANNEL_NONE = -1;
+    private static final int CHANNEL_REMOTE = 0;
+    private static final int CHANNEL_SNAPSHOT = 1;
+    private static final int CHANNEL_GLOBAL = 2;
+
+    /** 通道里没有修订号的哨兵值：负数表示「证明不了自己比别人新」 */
+    private static final long REV_UNKNOWN = -1L;
+
+    /** 上次记下的解析结果，用来抑制重复日志：值没变就不打 */
+    private static final Map<String, String> lastResolved = new HashMap<>();
+    /** 三条通道的就绪状态只在进程里打一次，避免每秒刷屏 */
+    private static volatile boolean channelsLogged;
 
     private static volatile XposedModule module;
 
@@ -52,62 +83,216 @@ public final class NexusBridge {
         }
     }
 
-    // ---- 分层读取：Remote → provider 快照 → Settings.Global → 默认值，一个个往下试 ----
+    // ---- 分层读取：按修订号挑最新的一套，见类注释 ----
 
     private static boolean readBool(String key, boolean def) {
         SharedPreferences p = getPrefs();
-        if (p != null && p.contains(key)) {
-            return p.getBoolean(key, def);
+        boolean inRemote = p != null && p.contains(key);
+        int channel = pickChannel(key, p, inRemote);
+        boolean value = def;
+        if (channel == CHANNEL_REMOTE) {
+            value = p.getBoolean(key, def);
+        } else if (channel == CHANNEL_SNAPSHOT) {
+            value = PrefsSnapshot.getBoolean(key, def);
+        } else if (channel == CHANNEL_GLOBAL) {
+            value = SettingsChannel.getBoolean(key, def);
         }
-        if (PrefsSnapshot.contains(key)) {
-            return PrefsSnapshot.getBoolean(key, def);
-        }
-        return SettingsChannel.getBoolean(key, def);
+        logResolved(key, channel, value);
+        return value;
     }
 
     private static int readInt(String key, int def) {
         SharedPreferences p = getPrefs();
-        if (p != null && p.contains(key)) {
-            return p.getInt(key, def);
+        boolean inRemote = p != null && p.contains(key);
+        int channel = pickChannel(key, p, inRemote);
+        int value = def;
+        if (channel == CHANNEL_REMOTE) {
+            value = p.getInt(key, def);
+        } else if (channel == CHANNEL_SNAPSHOT) {
+            value = PrefsSnapshot.getInt(key, def);
+        } else if (channel == CHANNEL_GLOBAL) {
+            value = SettingsChannel.getInt(key, def);
         }
-        if (PrefsSnapshot.contains(key)) {
-            return PrefsSnapshot.getInt(key, def);
-        }
-        return SettingsChannel.getInt(key, def);
+        logResolved(key, channel, value);
+        return value;
     }
 
     private static float readFloat(String key, float def) {
         SharedPreferences p = getPrefs();
-        if (p != null && p.contains(key)) {
-            return p.getFloat(key, def);
+        boolean inRemote = p != null && p.contains(key);
+        int channel = pickChannel(key, p, inRemote);
+        float value = def;
+        if (channel == CHANNEL_REMOTE) {
+            value = p.getFloat(key, def);
+        } else if (channel == CHANNEL_SNAPSHOT) {
+            value = PrefsSnapshot.getFloat(key, def);
+        } else if (channel == CHANNEL_GLOBAL) {
+            value = SettingsChannel.getFloat(key, def);
         }
-        if (PrefsSnapshot.contains(key)) {
-            return PrefsSnapshot.getFloat(key, def);
-        }
-        return SettingsChannel.getFloat(key, def);
+        logResolved(key, channel, value);
+        return value;
     }
 
     private static long readLong(String key, long def) {
         SharedPreferences p = getPrefs();
-        if (p != null && p.contains(key)) {
-            return p.getLong(key, def);
+        boolean inRemote = p != null && p.contains(key);
+        int channel = pickChannel(key, p, inRemote);
+        long value = def;
+        if (channel == CHANNEL_REMOTE) {
+            value = p.getLong(key, def);
+        } else if (channel == CHANNEL_SNAPSHOT) {
+            value = PrefsSnapshot.getLong(key, def);
+        } else if (channel == CHANNEL_GLOBAL) {
+            value = SettingsChannel.getLong(key, def);
         }
-        if (PrefsSnapshot.contains(key)) {
-            return PrefsSnapshot.getLong(key, def);
-        }
-        return SettingsChannel.getLong(key, def);
+        logResolved(key, channel, value);
+        return value;
     }
 
     private static String readString(String key, String def) {
         SharedPreferences p = getPrefs();
-        if (p != null && p.contains(key)) {
+        boolean inRemote = p != null && p.contains(key);
+        int channel = pickChannel(key, p, inRemote);
+        if (channel == CHANNEL_REMOTE) {
             String v = p.getString(key, def);
-            return v != null ? v : def;
+            String value = v != null ? v : def;
+            logResolved(key, channel, value);
+            return value;
         }
-        if (PrefsSnapshot.contains(key)) {
-            return PrefsSnapshot.getString(key, def);
+        if (channel == CHANNEL_SNAPSHOT) {
+            String value = PrefsSnapshot.getString(key, def);
+            logResolved(key, channel, value);
+            return value;
         }
-        return SettingsChannel.getString(key, def);
+        String value = SettingsChannel.getString(key, def);
+        logResolved(key, channel, value);
+        return value;
+    }
+
+    /**
+     * 这个键该从哪条通道读。
+     *
+     * 规则：
+     * 1. 只有一条通道有这个键——就它，没有可比的东西；
+     * 2. 多条都有，比修订号，取最大的那条（并列时按 Remote → 快照 → Global 的顺序，
+     *    因为并列说明是同一份数据，用近的那条少一次跨进程视角的偏差）；
+     * 3. 三条都没有修订号（升级前写下的数据）——退回老顺序：Remote → 快照 → Global。
+     *    这一条是为非 root 用户留的：他们只有 Remote 一条通道可用，不能因为缺修订号
+     *    就把 Remote 判死。
+     *
+     * inRemote 由调用方传进来，避免为了判断 contains 再取一次 RemotePreferences。
+     * 返回 CHANNEL_NONE 表示三处都没有这个键，调用方该用默认值。
+     */
+    private static int pickChannel(String key, SharedPreferences remote, boolean inRemote) {
+        logChannelsOnce();
+        boolean inSnapshot = PrefsSnapshot.contains(key);
+        boolean inGlobal = SettingsChannel.contains(key);
+        if (!inRemote && !inSnapshot && !inGlobal) {
+            return CHANNEL_NONE;
+        }
+        long revRemote = inRemote ? revOfRemote(remote) : REV_UNKNOWN;
+        long revSnapshot = inSnapshot
+                ? PrefsSnapshot.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN)
+                : REV_UNKNOWN;
+        long revGlobal = inGlobal
+                ? SettingsChannel.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN)
+                : REV_UNKNOWN;
+        long newest = Math.max(revRemote, Math.max(revSnapshot, revGlobal));
+        if (newest > REV_UNKNOWN) {
+            if (revRemote == newest) {
+                return CHANNEL_REMOTE;
+            }
+            return revSnapshot == newest ? CHANNEL_SNAPSHOT : CHANNEL_GLOBAL;
+        }
+        // 三边都证明不了新鲜度，按老顺序
+        if (inRemote) {
+            return CHANNEL_REMOTE;
+        }
+        return inSnapshot ? CHANNEL_SNAPSHOT : CHANNEL_GLOBAL;
+    }
+
+    /**
+     * Remote 那份表的修订号。
+     *
+     * 类型对不上会抛 ClassCastException（比如别处存成了字符串），这时按「没有修订号」
+     * 处理：宁可让别的通道胜出，也不要让读设置这个每秒都要跑的动作把 SystemUI 带崩。
+     */
+    private static long revOfRemote(SharedPreferences remote) {
+        if (remote == null) {
+            return REV_UNKNOWN;
+        }
+        try {
+            return remote.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN);
+        } catch (Throwable t) {
+            return REV_UNKNOWN;
+        }
+    }
+
+    /**
+     * 记一条 logcat 可见的诊断日志：某个键从哪条通道取到了什么值。
+     *
+     * 只在值变化时打一条——每秒轮询三十来个键，无条件打会把 logcat 刷满，反而没法用。
+     * 设置不生效这类问题全靠这几行定位：能看出「读到的是什么」和「是哪条通道给的」，
+     * 一眼就能区分「通道断了」和「读到了但没应用」。LogUtils 的输出只进 LSPosed 日志，
+     * 用户抓 logcat 时看不到，所以这里用 android.util.Log。
+     */
+    private static void logResolved(String key, int channel, Object value) {
+        String text = String.valueOf(value);
+        synchronized (lastResolved) {
+            String prev = lastResolved.put(key, text);
+            if (text.equals(prev)) {
+                return;
+            }
+        }
+        Log.i(TAG, key + "=" + text + " <- " + channelName(channel) + revSummary());
+    }
+
+    private static String channelName(int channel) {
+        switch (channel) {
+            case CHANNEL_REMOTE:
+                return "remote";
+            case CHANNEL_SNAPSHOT:
+                return "snapshot";
+            case CHANNEL_GLOBAL:
+                return "settings";
+            default:
+                return "default";
+        }
+    }
+
+    /** 三条通道的修订号摘要，附在诊断日志后面 */
+    private static String revSummary() {
+        SharedPreferences p = getPrefs();
+        long revRemote = revOfRemote(p);
+        long revSnapshot = PrefsSnapshot.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN);
+        long revGlobal = SettingsChannel.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN);
+        return " rev(r=" + revRemote + " s=" + revSnapshot + " g=" + revGlobal + ")";
+    }
+
+    /**
+     * 三条通道各自能不能用，进程生命周期里只打一次。
+     *
+     * 排查「设置不生效」时这是第一手材料：哪条通道没就绪，后面的问题就都顺理成章了。
+     * 第一次调用通常发生在窗口刚建好、两条兜底通道还没加载完的时候，那时打印出来只是
+     * 两条「not loaded」的噪声，所以等至少有一条兜底通道就绪之后再打。
+     */
+    private static void logChannelsOnce() {
+        if (channelsLogged) {
+            return;
+        }
+        if (!PrefsSnapshot.isReady() && !SettingsChannel.isReady()) {
+            return;
+        }
+        channelsLogged = true;
+        SharedPreferences p = getPrefs();
+        Log.i(TAG, "channels: remote=" + (p == null ? "unavailable"
+                        : (p.getAll().size() + " keys, rev=" + revOfRemote(p)))
+                + " snapshot=" + (PrefsSnapshot.isReady()
+                        ? "ready, rev=" + PrefsSnapshot.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN)
+                        : "not loaded")
+                + " settings=" + (SettingsChannel.isReady()
+                        ? "ready, rev=" + SettingsChannel.getLong(Constants.Remote.KEY_PREFS_REV, REV_UNKNOWN)
+                        : "not loaded"));
     }
 
     // ---- GPU 数据 ----

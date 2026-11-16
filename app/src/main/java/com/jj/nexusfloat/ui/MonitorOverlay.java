@@ -9,6 +9,7 @@ import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
@@ -94,6 +95,32 @@ public final class MonitorOverlay {
     private int signalTicks;
     /** 距上次后台唤醒过了多少轮（v1.8.11） */
     private int wakeElapsedTicks;
+    /**
+     * 当前防烧屏微移量，瞬态：不进设置、不落盘，关掉开关立刻归零。
+     *
+     * 之所以只放在内存里：这是「显示效果」不是「用户设定」。写进 prefs 会带来两个
+     * 麻烦——每 45 秒一次跨进程写盘（还带着 RemotePreferences 的整表同步），以及
+     * App 端界面上的「水平位置 / 垂直位置」会跟着漂移跳动。基值始终是用户设定的数，
+     * 漂移只是在 applyOffset() 里临时叠加上去。
+     */
+    private int driftX;
+    private int driftY;
+    /**
+     * 下一次该换漂移量的时刻，SystemClock.elapsedRealtime() 基准；0 表示还没起算。
+     *
+     * 为什么用墙钟而不是「算了几轮 evaluate」：evaluate() 有三个入口——watch 轮询、
+     * ACTION_CONFIGURATION_CHANGED / SCREEN_ON / SCREEN_OFF 广播。按次数计数的话，
+     * 分屏拖动、折叠屏连续改尺寸时广播能到每秒几十次，间隔会被压到 1~2 秒，
+     * 于是每两秒 updateViewLayout 一次——连续抖动的观感比不防烧屏还难受。
+     * 用时刻比较，多触发几次 evaluate 只是多问一嘴，到点才动。
+     *
+     * 不用 System.currentTimeMillis()：那个会被用户改系统时间、NTP 校准拨动，
+     * 往回拨一次就会让间隔变成几分钟甚至更久。elapsedRealtime 只受开机时长影响，
+     * 单调递增（含深睡），正是「隔了多久」该用的钟。
+     */
+    private long nextDriftAt;
+    /** 微移用的随机源，独立一个实例，别去动别的地方的 Random 序列 */
+    private final java.util.Random driftRandom = new java.util.Random();
 
     private final Runnable watchRunnable = new Runnable() {
         @Override
@@ -174,6 +201,12 @@ public final class MonitorOverlay {
         // 发了马上又得 resume，白折腾一轮跨进程调用
         lastCollectSignal = null;
         signalTicks = 0;
+        // 漂移跟着会话一起清掉：params 已经置空，留着旧值只会在下一次 start() 的
+        // 第一次 applyOffset() 里让新窗口先歪一下
+        driftX = 0;
+        driftY = 0;
+        // 节拍也从头起算：重新注入后是一个新的显示会话，不该沿用旧会话的剩余时间
+        nextDriftAt = 0L;
     }
 
     public boolean isShowing() {
@@ -267,6 +300,11 @@ public final class MonitorOverlay {
         // 监视条从来没添加过，也就谈不上「移除」这个迁移，可模块进程的采集默认是开着的，
         // 得靠这里把它关掉。signalCollector 自己会去重。
         signalCollector(shouldShow);
+
+        // 防烧屏微移：必须放在上面的 add/remove 迁移之后——只有窗口的「在不在」已经
+        // 定下来，才能判断这一轮该不该动。放在 signalCollector 之后是因为它是纯视觉
+        // 动作，不影响采集状态，晚一步执行没有任何副作用
+        maybeDrift();
 
         // 后台唤醒：模块进程被 ROM 清掉时，按用户设的间隔把它拉回来，
         // 否则 GPU 数据会一直停在进程被杀之前的值
@@ -388,26 +426,264 @@ public final class MonitorOverlay {
     /**
      * 应用用户设定的位置偏移。
      *
-     * lp.x / lp.y 是相对 gravity 锚点的偏移量。gravity 是 TOP|CENTER_HORIZONTAL，
-     * 所以 x 正值向右、y 正值向下，正好符合直觉。
+     * lp.x / lp.y 是相对 gravity 锚点的偏移量。锚点由「显示在屏幕底部」开关决定
+     * （见 resolveGravity()）：默认顶端，开了就是底部，水平方向恒为居中。
+     *
+     * y 的「值语义」与「param 语义」在底部基准下差一个负号，这里做换算：
+     * 界面上的「垂直位置」一律按「正值向下、负值向上」讲（StepperRow 的提示、
+     * changeAnchorBottom 的越界提醒都是这么写的），也就是屏幕坐标的方向，
+     * 跟锚点无关。可 AOSP Gravity 对 BOTTOM 是
+     * {@code outRect.bottom = container.bottom - yAdj}（正值向上），对 TOP 是
+     * {@code outRect.top = container.top + yAdj}（正值向下）。所以底部基准下
+     * 得把值取反再写进 params.y，界面那句「正值向下」在两种基准下才都成立，
+     * 用户换基准不用重新学一遍方向。
+     *
+     * gravity 也要在这里一起比较和同步，不能只在 buildParams 里定死：用户运行中
+     * 拨开关时窗口不会重建，唯一的生效路径是本方法返回 true 让 syncModuleFlags()
+     * 走到 updateViewLayout。而 gravity 只有在 updateViewLayout 里改才会被
+     * WindowManager 采纳——直接改完 params 不作为是不会生效的。
      *
      * 退化模式下（监视条是状态栏的子 View）没有窗口参数可改，直接跳过——
      * 那种模式本来就受状态栏布局摆布，位置微调无从下手。
      *
-     * 返回偏移有没有变。
+     * 防烧屏微移（driftX / driftY）在这里叠加到用户设定值上，基值永远是
+     * NexusBridge 读回来的那个数。这样用户改「水平位置 / 垂直位置」时不会因为
+     * 要「算干净」而先清掉漂移，也就不会在每次调值时明显跳一下。
+     * 注意 driftY 和 offsetY 同属「值语义」，所以要在取反之前叠加——见下面 paramY。
+     *
+     * 返回「gravity 或偏移」有没有变。
      */
     private boolean applyOffset() {
         if (params == null) {
             return false;
         }
-        int x = NexusBridge.getOffsetX();
-        int y = NexusBridge.getOffsetY();
-        if (params.x == x && params.y == y) {
+        int gravity = resolveGravity();
+        // 锚点直接从上面这次结果里取，不再调一次 anchoredBottom()：后者内部又会走一遍
+        // resolveGravity()，等于每秒多一次跨进程读；而且两次读之间用户若正好拨了
+        // 「显示在屏幕底部」，会出现「gravity 是 TOP、paramY 却按底部取了反」的一帧
+        boolean bottom = (gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.BOTTOM;
+        // x 叠加后仍要钳在 ±OFFSET_MAX_PX 内：用户已经调到 400px 时再加 2 会让整条
+        // 滑出屏幕一侧，那是真的看不见了，不是为了防烧屏该付的代价
+        int x = clampOffsetPx(NexusBridge.getOffsetX() + driftX);
+        // y 不钳：贴边时用户可能已经顶到 ±400，而漂移方向恰恰是「往屏幕内侧」的，
+        // 钳掉等于把这次微移吞了。漂移本身受 ±BURN_IN_AMPLITUDE_PX 约束，
+        // 不会把窗口推出屏幕
+        int y = NexusBridge.getOffsetY() + driftY;
+        // 值语义（正值向下）→ param 语义（BOTTOM 基准下的 yAdj 正值向上）。取反必须
+        // 放在叠加 driftY 之后：driftY 是按「值语义」取的（往屏幕内侧 = 顶部基准取正、
+        // 底部基准取负），先取反再叠加会让漂移方向反掉，那正是这一版要修的问题。
+        int paramY = bottom ? -y : y;
+        if (params.gravity == gravity && params.x == x && params.y == paramY) {
             return false;
         }
+        params.gravity = gravity;
         params.x = x;
-        params.y = y;
+        params.y = paramY;
         return true;
+    }
+
+    private static int clampOffsetPx(int px) {
+        return Math.max(Constants.Modules.OFFSET_MIN_PX,
+                Math.min(Constants.Modules.OFFSET_MAX_PX, px));
+    }
+
+    /**
+     * 防烧屏微移的节拍器：每隔 Constants.Modules#BURN_IN_INTERVAL_MS 换一个漂移量。
+     *
+     * 分三种情形：
+     * 1. 窗口不在（隐藏）或处于退化模式：不累计、不移动，顺手把残留的漂移归零。
+     *    归零要写回 params 而不是只是清字段——addToWindow() 复用旧 params 前会调
+     *    applyOffset()，字段已经干净了，那里刷出来就是用户的原始位置，不会带着
+     *    隐藏前的最后一点偏移突然出现。
+     * 2. 开关关着：如果之前开着留下过漂移，立刻归零并推一次布局，让位置马上回到
+     *    用户设定值。等 45 秒的下一个节拍才复位是不能接受的——用户点了开关却看到
+     *    监视条还歪着，只会以为开关坏了。
+     * 3. 开关开着：到点换一个新漂移量并推到窗口上。
+     *
+     * 节拍按 SystemClock.elapsedRealtime() 的时刻比较，不按 evaluate 次数：
+     * 后者会被配置变更广播带快（分屏拖动时每秒几十次），见 nextDriftAt 的注释。
+     */
+    private void maybeDrift() {
+        long now = SystemClock.elapsedRealtime();
+        if (!attached || params == null || fallbackMode) {
+            // 复位成「还没起算」：重新显示时从那一刻起算一个完整间隔，
+            // 否则用户切一圈回来可能立刻看到跳一下
+            nextDriftAt = 0L;
+            if (driftX != 0 || driftY != 0) {
+                driftX = 0;
+                driftY = 0;
+                // 窗口不在，没有布局可推；这里只是把干净的值写回 params 备用
+                applyOffset();
+            }
+            return;
+        }
+        if (!NexusBridge.isBurnInProtectEnabled()) {
+            nextDriftAt = 0L;
+            if (driftX == 0 && driftY == 0) {
+                return;
+            }
+            driftX = 0;
+            driftY = 0;
+            pushDrift();
+            return;
+        }
+        // 当前漂移必须落在当前基准的合法区间内。用户中途切换「显示在屏幕底部」时，
+        // 旧的 driftY 可能正好是反方向的（顶部基准的 +2 到底部基准就是朝屏幕外），
+        // 那样监视条会被屏幕边缘裁掉一条，而且要等满一个间隔才自愈。
+        // 发现越界就立刻换一个，但**不动 nextDriftAt**：这是纠错，不是「到点微移」，
+        // 顺带把下一次正常微移往后推会让人转几次屏就再也等不到微移。
+        if (!driftInBounds()) {
+            pickDrift();
+            pushDrift();
+        }
+        if (nextDriftAt == 0L) {
+            // 首次（刚显示 / 刚打开开关）：从这里起算一个完整间隔
+            nextDriftAt = now + Constants.Modules.BURN_IN_INTERVAL_MS;
+            return;
+        }
+        if (now < nextDriftAt) {
+            return;
+        }
+        nextDriftAt = now + Constants.Modules.BURN_IN_INTERVAL_MS;
+        pickDrift();
+        if (!pushDrift()) {
+            // 白动的那一轮：|offsetX| 已经顶到 400 时，抽到的 x 若指向屏幕外会被
+            // clampOffsetPx 钳回 400，要是这一轮 y 又恰好没变，params 就一个数都没动
+            // （漂移字段变了、窗口没动，等于这一轮白微移）。再换一个重推一次——
+            // 只重试一次不写成循环：实测残余约 1.2%（且必须先把水平位置顶到 ±400），
+            // 代价只是那一轮没动，下次节拍照常，没有抖动风险；
+            // 写成循环反而有理论上的重试尾巴
+            pickDrift();
+            pushDrift();
+        }
+    }
+
+    /**
+     * 当前 driftX / driftY 是不是落在当前基准的合法区间内（见 driftMinY() 的方向约束）。
+     *
+     * 之所以要单独判：合法区间依赖于「顶端还是底部」这个运行时可变的基准，
+     * 漂移量却是跨基准保留的，所以切基准之后旧值可能变成越界值（顶部基准的 +2
+     * 到底部基准就是朝屏幕外）。发现越界立刻换一个，不用等满一个间隔才自愈。
+     */
+    private boolean driftInBounds() {
+        int amp = Constants.Modules.BURN_IN_AMPLITUDE_PX;
+        boolean bottom = anchoredBottom();
+        return driftX >= -amp && driftX <= amp
+                && driftY >= driftMinY(bottom) && driftY <= driftMaxY(bottom);
+    }
+
+    /**
+     * 漂移 y 分量的合法下限（值语义：正值向下、负值向上）。
+     *
+     * 顶部基准：窗口贴屏幕上沿，能走的只有「往下」，所以下限 0；
+     * 底部基准：窗口贴屏幕下沿，能走的只有「往上」，所以下限为 -A。
+     *
+     * 这里说的是**值语义**（界面上「垂直位置」的那套方向），不是 params.y 的语义。
+     * 依据是 AOSP android/view/Gravity.java：L278 `outRect.top = container.top + yAdj`
+     * （TOP，正值向下）、L289 `outRect.bottom = container.bottom - yAdj`
+     * （BOTTOM，正值向上），L212-214 的 javadoc 也写着「if gravity is BOTTOM it pushes
+     * it up」。我们在 applyOffset() 里已经把底部基准的值取反成 param 语义，所以按
+     * 「值语义」取区间就够了，取反后会正好落在屏幕内侧。
+     *
+     * 注意这个区间看起来和 AOSP「正值朝内」的结论相反（底部取 [-A,0] 而不是 [0,+A]），
+     * 那是对的、不是笔误：AOSP 那句讲的是 yAdj（params 空间），这里的 [-A,0] 讲的是
+     * 值空间，两者在底部基准下差一个负号。换算只发生在 applyOffset() 一处。
+     */
+    private static int driftMinY(boolean bottom) {
+        return bottom ? -Constants.Modules.BURN_IN_AMPLITUDE_PX : 0;
+    }
+
+    /** 漂移 y 分量的合法上限（值语义）：顶部基准往下能走到 +A，底部基准最多回到原位 0 */
+    private static int driftMaxY(boolean bottom) {
+        return bottom ? 0 : Constants.Modules.BURN_IN_AMPLITUDE_PX;
+    }
+
+    /**
+     * 把当前的 driftX / driftY 反映到窗口上，位置没变就不折腾 WindowManager。
+     *
+     * 返回「窗口位置到底有没有变化」：判断是不是白动一轮的调用方要看它，
+     * 只是想刷一下的调用方忽略返回值即可。
+     */
+    private boolean pushDrift() {
+        if (!applyOffset()) {
+            return false;
+        }
+        if (windowManager == null || content == null) {
+            return true;
+        }
+        try {
+            windowManager.updateViewLayout(content, params);
+        } catch (Throwable t) {
+            LogUtils.w("MonitorOverlay burn-in drift updateViewLayout failed", t);
+        }
+        return true;
+    }
+
+    /**
+     * 生成新的漂移量，保证和当前值不同（否则这一轮等于没动）。
+     *
+     * 方向约束：漂移只能取「往屏幕内侧」的那半边，绝对不能把已经贴边的窗口推到屏幕外。
+     * 取值按**值语义**（正值向下、负值向上，也就是界面上「垂直位置」那套方向）：
+     * - y 分量：顶部基准 [0, +A]（往下挪），底部基准 [-A, 0]（往上抬），见 driftMinY()
+     * - x 分量：水平居中，两侧都是屏幕内，取全区间 [-A, +A]（越界由 applyOffset 的钳制兜住）
+     *
+     * 实现上把所有合法取值摊成一维下标，然后在「除当前值以外」的取值里随机取一个。
+     * 用摊平下标而不是 do-while 重试：重试有个理论上不收敛的尾巴（连续抽到旧值），
+     * 而且概率上也不好解释；摊平之后一次就够，逻辑还更好读。
+     */
+    private void pickDrift() {
+        int amp = Constants.Modules.BURN_IN_AMPLITUDE_PX;
+        // 基准只问一次：resolveGravity() 底下是一次跨进程读，能省就省
+        boolean bottom = anchoredBottom();
+        int minY = driftMinY(bottom);
+        int yCount = driftMaxY(bottom) - minY + 1;
+        int total = (2 * amp + 1) * yCount;
+        // 当前值的下标。用户中途切换了定位基准时，旧 driftY 可能落在新区间之外，
+        // 算出的下标就越界了——不要紧，下面取模后照样是一个合法下标，只是等于是
+        // 随机换了个新位置
+        int current = (driftX + amp) * yCount + (driftY - minY);
+        // 跳过当前下标里「自己」，就能保证新值一定和旧值不同
+        int step = 1 + driftRandom.nextInt(Math.max(1, total - 1));
+        int next = Math.floorMod(current + step, total);
+        driftX = next / yCount - amp;
+        driftY = next % yCount + minY;
+    }
+
+    /**
+     * 定位基准：默认屏幕顶端，开了「显示在屏幕底部」就换成底部；水平方向恒为居中。
+     *
+     * 抽成一个方法是因为 buildParams()（首次建窗口、旋转后重建）和 applyOffset()
+     * （运行中拨开关）都得用同一个答案，两处各写一份三元表达式迟早会有一处漏改，
+     * 表现就是「开关打开后只有转屏才生效」这种很难复现的问题。
+     */
+    private static int resolveGravity() {
+        return NexusBridge.isAnchorBottom()
+                ? Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                : Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+    }
+
+    /**
+     * 当前是不是以屏幕底部为定位基准。
+     *
+     * 从 resolveGravity() 反推而不是直接再读一次 NexusBridge.isAnchorBottom()：定位基准
+     * 的定义只在 resolveGravity() 里写一份，y 的方向换算（applyOffset / buildParams）
+     * 和防烧屏微移的合法区间都必须跟着同一个答案走，否则以后基准判定改了
+     * （比如横向改成左右锚定），这里会悄悄用错方向的偏移，表现就是「开着微移
+     * 监视条往屏幕外跑」或者「底部模式下垂直位置反着走」。
+     *
+     * 必须按 VERTICAL_GRAVITY_MASK 取值比较，不能写 (g & Gravity.BOTTOM) != 0：
+     * TOP 的 0x30 和 BOTTOM 的 0x50 有重叠位（0x10），按位与会非零，顶端基准
+     * 也会被判成底部。
+     *
+     * 判据来自 AOSP android/view/Gravity.java：L278 `outRect.top = container.top + yAdj`
+     * （TOP 走 AXIS_PULL_BEFORE，yAdj 正值向下）、L289
+     * `outRect.bottom = container.bottom - yAdj`（BOTTOM 走 AXIS_PULL_AFTER，yAdj 正值
+     * 向上），L212-214 的 javadoc 原文「if gravity is TOP this pushes it down;
+     * if gravity is BOTTOM it pushes it up」。正因为两者方向相反，写 params.y 时才
+     * 需要按基准翻一次符号，见 applyOffset() 与 buildParams()。
+     */
+    private static boolean anchoredBottom() {
+        return (resolveGravity() & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.BOTTOM;
     }
 
     /**
@@ -511,6 +787,13 @@ public final class MonitorOverlay {
         if (params == null) {
             params = buildParams(Constants.Overlay.WINDOW_TYPES[0],
                     dp2px(Constants.Ui.MONITOR_BAR_HEIGHT_DP));
+        } else {
+            // 复用旧 params 前先把 gravity / x / y 刷新一遍：窗口隐藏期间用户可能
+            // 拨了「显示在屏幕底部」或调了位置，旧对象里还带着上次的基准，直接
+            // addView 会让监视条先闪一下旧位置。syncModuleFlags() 每轮虽然也会调
+            // applyOffset()，但它在 monitorView == null 时会提前返回，
+            // 这条路径不能指望它，所以这里再同步一次（幂等，没变就什么都不做）
+            applyOffset();
         }
         windowState = STATE_ADDING;
         try {
@@ -568,12 +851,26 @@ public final class MonitorOverlay {
                 flags,
                 PixelFormat.TRANSLUCENT);
 
-        // 贴屏幕最顶端：y = 0 配合 FLAG_LAYOUT_IN_SCREEN / FLAG_LAYOUT_NO_LIMITS，
-        // 竖屏横屏都紧贴各自方向下的物理屏幕上边缘，不再按状态栏高度居中下移。
-        // x/y 之后会被「位置微调」覆盖，见 applyOffset()
-        lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        // 贴屏幕边：y = 0 配合 FLAG_LAYOUT_IN_SCREEN / FLAG_LAYOUT_NO_LIMITS，
+        // 竖屏横屏都紧贴各自方向下的物理屏幕边缘（默认上边缘，开了「显示在屏幕底部」
+        // 就是下边缘、压在手势栏上），不再按状态栏高度居中下移。
+        //
+        // y 用「值语义」写：界面上「垂直位置」一律按「正值向下、负值向上」讲，与锚点
+        // 无关，所以底部基准这里要取反再写进 lp.y。原因是 AOSP Gravity 的两条公式
+        // 方向不同——TOP 走 PULL_BEFORE（top = container.top + yAdj，正值向下），
+        // BOTTOM 走 PULL_AFTER（bottom = container.bottom - yAdj，正值向上）。
+        // 取反之后，「正值推到哪里出屏」在两个基准下才对称：顶端基准正值往下是屏幕内、
+        // 负值出上沿；底部基准正值往下是出下沿、负值是屏幕内。界面切换基准时会提示
+        // 这种越界，见 MainActivity#changeAnchorBottom()。
+        //
+        // 建窗这一帧也要取反：否则先按未取反的 y 建出来，紧接着 syncModuleFlags() 的
+        // applyOffset() 再纠正，用户会看到监视条先闪一下反方向。建窗时 drift 必为 0
+        // （start()/stop() 都清过），所以只算用户值。
+        // x/y 和 gravity 之后都会被「位置微调」和「显示在屏幕底部」覆盖，见 applyOffset()
+        lp.gravity = resolveGravity();
         lp.x = NexusBridge.getOffsetX();
-        lp.y = NexusBridge.getOffsetY();
+        int userY = NexusBridge.getOffsetY();
+        lp.y = anchoredBottom() ? -userY : userY;
         lp.windowAnimations = 0;
         lp.setTitle(Constants.Overlay.WINDOW_TITLE);
 
@@ -582,7 +879,8 @@ public final class MonitorOverlay {
             lp.layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
-        // 脱离系统 insets，才能稳稳停在屏幕最顶部
+        // 脱离系统 insets，才能稳稳停在屏幕最边缘——顶端基准贴物理屏幕上沿，
+        // 底部基准贴物理屏幕下沿（不被导航栏/手势栏的 inset 顶上来）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 lp.setFitInsetsTypes(0);

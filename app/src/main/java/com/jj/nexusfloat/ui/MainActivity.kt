@@ -18,6 +18,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -45,20 +46,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -163,6 +169,21 @@ class MainActivity : ComponentActivity() {
     private var offsetX by mutableStateOf(0)
     private var offsetY by mutableStateOf(0)
     /**
+     * 「显示在屏幕底部」开关：打开后悬浮窗的定位基准从屏幕顶端换成屏幕底部
+     * （系统手势栏那一带），偏移量含义不变。
+     *
+     * 默认 false = 老行为，老用户升级后读不到这个键，监视条仍在顶端。
+     */
+    private var anchorBottom by mutableStateOf(false)
+    /**
+     * 「防烧屏微移」开关：打开后监视条每隔 45 秒在 ±2px 内随机挪一下，
+     * 让文字笔画老化到不同的子像素上，延缓 OLED 残影。
+     *
+     * 默认 false = 不动，老用户升级后读不到这个键，监视条和现在一模一样。
+     * 微移是能被察觉的「小动作」，默认开着容易被当成渲染抖动。
+     */
+    private var burnInProtect by mutableStateOf(false)
+    /**
      * 「刷新时间」输入框里的文本，不是数值。
      *
      * 存文本是为了让用户能正常键入：输入「1.5」会经过「1」「1.」两个中间态，
@@ -252,6 +273,8 @@ class MainActivity : ComponentActivity() {
             .coerceIn(Constants.Modules.OFFSET_MIN_PX, Constants.Modules.OFFSET_MAX_PX)
         offsetY = readInt(Constants.Modules.KEY_OFFSET_Y, 0)
             .coerceIn(Constants.Modules.OFFSET_MIN_PX, Constants.Modules.OFFSET_MAX_PX)
+        anchorBottom = readSwitch(Constants.Modules.KEY_ANCHOR_BOTTOM, default = false)
+        burnInProtect = readSwitch(Constants.Modules.KEY_BURN_IN_PROTECT, default = false)
         intervalText = formatInterval(
             readInt(Constants.Modules.KEY_UPDATE_INTERVAL, Constants.Config.UPDATE_INTERVAL_MS)
                 .coerceIn(
@@ -430,9 +453,15 @@ class MainActivity : ComponentActivity() {
                             onSpacingChange = { delta -> changeSpacing(delta) },
                             offsetX = offsetX,
                             onOffsetXChange = { delta -> changeOffset(true, delta) },
+                            onOffsetXSet = { px -> setOffset(true, px) },
                             offsetY = offsetY,
                             onOffsetYChange = { delta -> changeOffset(false, delta) },
+                            onOffsetYSet = { px -> setOffset(false, px) },
                             onOffsetReset = { resetOffset() },
+                            anchorBottom = anchorBottom,
+                            onAnchorBottomChange = { enabled -> changeAnchorBottom(enabled) },
+                            burnInProtect = burnInProtect,
+                            onBurnInProtectChange = { enabled -> changeBurnInProtect(enabled) },
                             intervalText = intervalText,
                             onIntervalTextChange = { intervalText = it },
                             onIntervalCommit = { commitInterval() },
@@ -1021,13 +1050,94 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 位置复位到屏幕顶端居中 */
+    /**
+     * 直接设定监视条位置（快速输入框用），不走 2px 步进。
+     *
+     * 跟 changeOffset 分开是因为语义不一样：changeOffset 收的是增量，用户点一下挪 2px，
+     * 越界时"点了没动静"符合直觉（已经在头上了）；这里收的是用户敲进去的绝对值，
+     * 越界必须明确告诉他实际被改成了多少，否则他以为输入的 -500 生效了，
+     * 转头发现位置不对又要再挪一遍。
+     */
+    private fun setOffset(horizontal: Boolean, px: Int) {
+        val target = px.coerceIn(Constants.Modules.OFFSET_MIN_PX, Constants.Modules.OFFSET_MAX_PX)
+        if (target != px) {
+            Toast.makeText(
+                this,
+                "已调整到可调范围 ${Constants.Modules.OFFSET_MIN_PX} ~ " +
+                        "${Constants.Modules.OFFSET_MAX_PX} px",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        if (horizontal) {
+            offsetX = target
+            saveInt(Constants.Modules.KEY_OFFSET_X, target)
+        } else {
+            offsetY = target
+            saveInt(Constants.Modules.KEY_OFFSET_Y, target)
+        }
+    }
+
+    /**
+     * 切换「显示在屏幕底部」。
+     *
+     * 故意不清空 offsetX / offsetY：切基准不该顺手改用户已经调好的数字，
+     * 他可能只是先切过去看一眼再切回来。
+     *
+     * 但两边并不等价，别把同一个 offsetY 当成「原样平移」：y 的正负方向在两种基准下
+     * 是一致的（正值向下），可「相对锚点往屏幕里还是往屏幕外」取决于锚点在哪——
+     * 顶端基准下正值往屏幕里挪、负值被推出屏幕上沿；底部基准下负值往上抬离手势栏、
+     * 正值被推出屏幕下沿。极端值切过去就会让监视条整条消失，所以下面要提示越界。
+     *
+     * 写盘交给 saveSwitch：它自己会做本地 + RemotePreferences 双写并推整表到
+     * Settings.Global，这里不用再碰任何通道。
+     */
+    private fun changeAnchorBottom(enabled: Boolean) {
+        anchorBottom = enabled
+        saveSwitch(Constants.Modules.KEY_ANCHOR_BOTTOM, enabled)
+        // 只提示、不动数值：用户可能就是想留着这个值，切回去还要用。
+        // 0 在两种基准下都是贴边可见，不用管；只有「切到顶部时是负值」和
+        // 「切到底部时是正值」这两种情况会把监视条推出屏幕
+        if (enabled && offsetY > 0) {
+            Toast.makeText(
+                this,
+                "垂直位置 ${offsetY}px 在底部基准下会把监视条推出屏幕，建议改成负值往上抬",
+                Toast.LENGTH_LONG
+            ).show()
+        } else if (!enabled && offsetY < 0) {
+            Toast.makeText(
+                this,
+                "垂直位置 ${offsetY}px 在顶端基准下会把监视条推出屏幕，建议改成正值往下挪",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
+     * 防烧屏微移开关。
+     *
+     * 只设状态 + 存盘，不做别的：漂移量是 SystemUI 进程里的瞬态，App 这边根本不知道
+     * 它当前的偏移是多少，也没有必要知道。监视条的 watch 循环每秒会重新读一次这个键
+     * （见 MonitorOverlay#maybeDrift），所以打开后最多 1 秒内开始计时、关掉后最多
+     * 1 秒内回到原位。
+     *
+     * 写盘交给 saveSwitch：它自己会做本地 + RemotePreferences 双写并推整表到
+     * Settings.Global，这里不用再碰任何通道。
+     */
+    private fun changeBurnInProtect(enabled: Boolean) {
+        burnInProtect = enabled
+        saveSwitch(Constants.Modules.KEY_BURN_IN_PROTECT, enabled)
+    }
+
+    /** 位置复位到当前定位基准的居中位置 */
     private fun resetOffset() {
         offsetX = 0
         offsetY = 0
         saveInt(Constants.Modules.KEY_OFFSET_X, 0)
         saveInt(Constants.Modules.KEY_OFFSET_Y, 0)
-        Toast.makeText(this, "已复位到顶端居中", Toast.LENGTH_SHORT).show()
+        // 提示文案跟着当前锚点走：开关在底部时如果说「已复位到顶端居中」，
+        // 用户会以为复位把基准也改回去了
+        val anchor = if (anchorBottom) "底部" else "顶端"
+        Toast.makeText(this, "已复位到${anchor}居中", Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -1245,9 +1355,15 @@ fun MainScreen(
     onSpacingChange: (Float) -> Unit,
     offsetX: Int,
     onOffsetXChange: (Int) -> Unit,
+    onOffsetXSet: (Int) -> Unit,
     offsetY: Int,
     onOffsetYChange: (Int) -> Unit,
+    onOffsetYSet: (Int) -> Unit,
     onOffsetReset: () -> Unit,
+    anchorBottom: Boolean,
+    onAnchorBottomChange: (Boolean) -> Unit,
+    burnInProtect: Boolean,
+    onBurnInProtectChange: (Boolean) -> Unit,
     intervalText: String,
     onIntervalTextChange: (String) -> Unit,
     onIntervalCommit: () -> Unit,
@@ -1402,9 +1518,15 @@ fun MainScreen(
                         onSpacingChange = onSpacingChange,
                         offsetX = offsetX,
                         onOffsetXChange = onOffsetXChange,
+                        onOffsetXSet = onOffsetXSet,
                         offsetY = offsetY,
                         onOffsetYChange = onOffsetYChange,
-                        onOffsetReset = onOffsetReset
+                        onOffsetYSet = onOffsetYSet,
+                        onOffsetReset = onOffsetReset,
+                        anchorBottom = anchorBottom,
+                        onAnchorBottomChange = onAnchorBottomChange,
+                        burnInProtect = burnInProtect,
+                        onBurnInProtectChange = onBurnInProtectChange
                     )
                 }
 
@@ -2264,10 +2386,22 @@ fun AppearanceCard(
     onSpacingChange: (Float) -> Unit,
     offsetX: Int,
     onOffsetXChange: (Int) -> Unit,
+    onOffsetXSet: (Int) -> Unit,
     offsetY: Int,
     onOffsetYChange: (Int) -> Unit,
-    onOffsetReset: () -> Unit
+    onOffsetYSet: (Int) -> Unit,
+    onOffsetReset: () -> Unit,
+    anchorBottom: Boolean,
+    onAnchorBottomChange: (Boolean) -> Unit,
+    burnInProtect: Boolean,
+    onBurnInProtectChange: (Boolean) -> Unit
 ) {
+    // 快速输入弹窗当前在编辑哪个方向。状态放在卡片顶层而不是塞进 if 分支里：
+    // 对话框关掉后这一段重组，写在条件里的 remember 会被回收，再次打开时
+    // 就会带着上一次敲到一半的内容出来
+    var editingOffsetX by remember { mutableStateOf(false) }
+    var editingOffsetY by remember { mutableStateOf(false) }
+
     SectionCard(title = "外观与校正") {
         // 给监视条加个圆角灰底，宽度跟着监视项目的增减自动伸缩
         ToggleRow(
@@ -2348,10 +2482,16 @@ fun AppearanceCard(
         Spacer(modifier = Modifier.height(8.dp))
 
         // 位置微调：改的是悬浮窗的 x/y 偏移，不动内容布局。
-        // 默认贴屏幕顶端居中，挖孔、圆角、异形屏或者第三方状态栏布局下
-        // 可能压住别的元素，得挪开一点
+        // 默认贴屏幕顶端居中（开了「显示在屏幕底部」就贴屏幕底部），挖孔、圆角、异形屏
+        // 或者第三方状态栏布局下可能压住别的元素，得挪开一点。
+        // 数值本身可点：−/+ 每下只挪 2px，要挪 50px 得点 25 下，
+        // 所以点数值弹窗直接键入目标位置
         Text(
-            text = "位置微调（相对屏幕顶端居中）",
+            text = if (anchorBottom) {
+                "位置微调（相对屏幕底部居中，点数值可直接输入）"
+            } else {
+                "位置微调（相对屏幕顶端居中，点数值可直接输入）"
+            },
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = MdThemeOnSurfaceVariant,
@@ -2362,7 +2502,8 @@ fun AppearanceCard(
             value = "$offsetX px",
             onDecrease = { onOffsetXChange(-Constants.Modules.OFFSET_STEP_PX) },
             onIncrease = { onOffsetXChange(Constants.Modules.OFFSET_STEP_PX) },
-            description = "负值向左、正值向右"
+            description = "负值向左、正值向右",
+            onValueClick = { editingOffsetX = true }
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -2372,18 +2513,73 @@ fun AppearanceCard(
             value = "$offsetY px",
             onDecrease = { onOffsetYChange(-Constants.Modules.OFFSET_STEP_PX) },
             onIncrease = { onOffsetYChange(Constants.Modules.OFFSET_STEP_PX) },
-            description = "负值向上、正值向下"
+            description = "负值向上、正值向下",
+            onValueClick = { editingOffsetY = true }
         )
 
         if (offsetX != 0 || offsetY != 0) {
             Spacer(modifier = Modifier.height(8.dp))
             ActionRow(
                 label = "复位位置",
-                description = "回到屏幕顶端居中",
+                description = if (anchorBottom) "回到屏幕底部居中" else "回到屏幕顶端居中",
                 buttonText = "复位",
                 onClick = onOffsetReset
             )
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 定位基准开关：紧跟在「位置微调」后面 —— 上面的两个数字是「相对锚点挪多少」，
+        // 这一项决定锚点本身在顶端还是底端，调整位置时这两件事在脑子里是一件事，
+        // 分开放会让人以为位置微调只对顶端有效。
+        // 挖孔/灵动岛、圆角或者第三方状态栏占住顶部时机型，靠 ±400px 微调救不回来，
+        // 换到手势栏那一带才真的能用
+        ToggleRow(
+            label = Constants.Modules.LABEL_ANCHOR_BOTTOM,
+            checked = anchorBottom,
+            onCheckedChange = onAnchorBottomChange,
+            description = "打开后以屏幕底部为基准定位，监视条落在系统手势栏那一带；关掉则回到屏幕顶端"
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 防烧屏微移：放在这张卡片的最后——它是「监视条整体怎么摆」这一族的收尾项，
+        // 跟前面的字色字号是两回事，插在中间会打断那段连续的排版调节。
+        // 描述里写清多久、动多少、为了什么：只写「防烧屏」三个字没人知道它在干什么，
+        // 反而容易让人以为开了就不烧屏了
+        ToggleRow(
+            label = Constants.Modules.LABEL_BURN_IN_PROTECT,
+            checked = burnInProtect,
+            onCheckedChange = onBurnInProtectChange,
+            description = "每隔 45 秒在 2 像素内轻微移动监视条，避免文字长期点亮同一批像素造成屏幕残影"
+        )
+    }
+
+    // 弹窗放在卡片外面：Dialog 自己开一个窗口，不占这列布局的位置，
+    // 挂在 SectionCard 里面只会让人误以为它参与排版
+    if (editingOffsetX) {
+        OffsetInputDialog(
+            title = Constants.Modules.LABEL_OFFSET_X,
+            directionHint = "负值向左，正值向右",
+            current = offsetX,
+            onDismiss = { editingOffsetX = false },
+            onConfirm = { px ->
+                editingOffsetX = false
+                onOffsetXSet(px)
+            }
+        )
+    }
+    if (editingOffsetY) {
+        OffsetInputDialog(
+            title = Constants.Modules.LABEL_OFFSET_Y,
+            directionHint = "负值向上，正值向下",
+            current = offsetY,
+            onDismiss = { editingOffsetY = false },
+            onConfirm = { px ->
+                editingOffsetY = false
+                onOffsetYSet(px)
+            }
+        )
     }
 }
 
@@ -2479,6 +2675,8 @@ private fun ColorPickerRow(
  * 一行「名称 + 数值 + 加减按钮」，容器样式跟 ToggleRow 一致，排版才统一。
  *
  * description 是可选的补充说明，为空就不占位。
+ * onValueClick 不为空时数值本身变成可点的小块（位置微调用来弹快速输入框），
+ * 默认 null 保持纯文本，其它调用点行为不变。
  */
 @Composable
 private fun StepperRow(
@@ -2486,7 +2684,8 @@ private fun StepperRow(
     value: String,
     onDecrease: () -> Unit,
     onIncrease: () -> Unit,
-    description: String = ""
+    description: String = "",
+    onValueClick: (() -> Unit)? = null
 ) {
     val shape = RoundedCornerShape(14.dp)
     Row(
@@ -2514,12 +2713,34 @@ private fun StepperRow(
                 )
             }
         }
-        Text(
-            text = value,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            color = MdThemePrimary
-        )
+        if (onValueClick == null) {
+            Text(
+                text = value,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = MdThemePrimary
+            )
+        } else {
+            // 数值做成可点的小块：行内塞不下输入框（右边被 ± 两个按钮占满），
+            // 又得让用户一眼看出「这里能点」，所以照 NumberFieldRow 输入框的
+            // 观感给一层浅底 + 描边，点开是弹窗输入
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button, onClick = onValueClick)
+                    .background(MdThemeSurface)
+                    .border(1.dp, CardStroke, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .semantics { contentDescription = "$label $value，点击可输入精确数值" }
+            ) {
+                Text(
+                    text = value,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MdThemePrimary
+                )
+            }
+        }
         Spacer(modifier = Modifier.width(10.dp))
         FilledTonalButton(
             onClick = onDecrease,
@@ -2537,6 +2758,164 @@ private fun StepperRow(
             Text(text = "+", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
     }
+}
+
+/**
+ * 快速输入框的文本校验：只判断「接受 / 整次拒绝」，不清洗字符。
+ *
+ * 清洗式过滤（把非法字符剥掉再拼起来）是在静默篡改数值：`10.5` 被剥成 `105`、
+ * `abc-12x` 剥成 `12`（负号因为不在首位被丢掉），用户按下确定就生效，得到的
+ * 是一个他根本没输入过的数——比直接拒绝更糟，因为界面不会告诉他发生了转换。
+ * 所以这里只做白名单判断，不合法就整次丢弃这次编辑，框里保持上一个合法内容。
+ *
+ * 空串和单个负号是打字过程中的中间态，必须放行，否则负数永远输不进去。
+ */
+private fun isAcceptableOffsetInput(raw: String): Boolean {
+    if (raw.isEmpty() || raw == "-") return true
+    val body = if (raw.startsWith("-")) raw.substring(1) else raw
+    // 4 位数字加可选负号，最长 -9999：足够覆盖 -400 ~ 400，又能挡住误触和长串粘贴
+    return body.length in 1..4 && body.all { it in '0'..'9' }
+}
+
+/**
+ * 「位置微调」的快速输入弹窗：直接键入目标像素值。
+ *
+ * 为什么要弹窗而不是在行内加个输入框：位置那一行右边已经被 − / + 两个按钮
+ * 占满，再挤一个输入框进去只够显示两三位数字，还容易误触；而且行内输入会和
+ * 2px 步进的语义打架——用户分不清敲进去的 50 是「再挪 50」还是「挪到 50」。
+ * 弹窗里空间管够，标题写明方向、正文写明范围，框里的数就是最终位置，不含糊。
+ *
+ * 输入过程中只做「接受 / 整次拒绝」的白名单校验，既不清洗字符也不改写数值：
+ * 边打边纠正会让「-」这种中间态留不住，而清洗非法字符会把 10.5 变成 105，
+ * 等于替用户捏造了一个他没输入过的数。解析失败和越界钳制都推到按下「确定」时做。
+ *
+ * @param current 打开时的当前位置，用来预填输入框
+ * @param directionHint 坐标轴的正负方向说明，避免用户凭空猜
+ * @param onConfirm 只在解析出合法整数时回调，越界由上层钳制并提示
+ */
+@Composable
+private fun OffsetInputDialog(
+    title: String,
+    directionHint: String,
+    current: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit
+) {
+    val context = LocalContext.current
+    // 预填当前值并整段选中：用户点开这一行就是要换个数，全选状态下第一个按键
+    // 直接替换掉旧值。不选中的话光标会落在预填的「0」前面或后面，输入 -10 会
+    // 变成 -100，或者负号被过滤掉变成 +10（方向还反了）——这不该是「快速输入」
+    // 要用户自己先删一遍的事。
+    // remember 挂在 current 上：每次打开都从当前值重新起算，不残留上次的输入。
+    var text by remember(current) {
+        val initial = current.toString()
+        mutableStateOf(TextFieldValue(text = initial, selection = TextRange(0, initial.length)))
+    }
+    // 弹窗一开就聚焦：不聚焦键盘不弹，用户还得再点一下输入框，
+    // 顺带 ImeAction.Done 也就永远走不到了
+    val focusRequester = remember { FocusRequester() }
+    // 只在第一次拿到焦点时补一次全选，之后用户自己挪的光标不再干预
+    var didAutoSelect by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // 等一帧再请求焦点：弹窗内容刚进组合时焦点节点还没挂到窗口上，
+        // 这时候 requestFocus 会抛 IllegalStateException
+        withFrameNanos { }
+        // 万一节点确实没挂上，宁可这次不自动聚焦，也不能崩掉整个界面
+        runCatching { focusRequester.requestFocus() }
+        // 有的输入法在焦点落进输入框时会把光标摆到末尾并清掉选区，
+        // 这里再全选一次，保证「第一条输入即覆盖预填值」
+        text = text.copy(selection = TextRange(0, text.text.length))
+    }
+
+    // 提交时才解析：空串、只剩一个「-」都算无效，这时候不猜用户想输多少，
+    // 保持原值并提示，弹窗也不关——他多半只是还没打完
+    fun submit() {
+        val px = text.text.toIntOrNull()
+        if (px == null) {
+            Toast.makeText(context, "请输入数字", Toast.LENGTH_SHORT).show()
+            return
+        }
+        onConfirm(px)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "$title · 快速输入",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = MdThemeOnSurface
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = "可调范围 ${Constants.Modules.OFFSET_MIN_PX} ~ " +
+                            "${Constants.Modules.OFFSET_MAX_PX} px，$directionHint",
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    color = MdThemeOnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(
+                        value = text,
+                        onValueChange = { input ->
+                            // 只做「接受 / 整次拒绝」，不清洗字符（理由见
+                            // isAcceptableOffsetInput）：不合法就保持框里上一个
+                            // 合法内容，绝不把非法输入改造成另一个数
+                            if (isAcceptableOffsetInput(input.text)) text = input
+                        },
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            color = MdThemePrimary,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        ),
+                        cursorBrush = SolidColor(MdThemePrimary),
+                        keyboardOptions = KeyboardOptions(
+                            // 用 Ascii 不用 Number：多数输入法的数字键盘上没有负号键，
+                            // 而这里的取值范围是 [-400, 400]，敲不出负号就废了一半；
+                            // 敲进来的字母由上面的校验整次拒绝
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { submit() }),
+                        modifier = Modifier
+                            .width(120.dp)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focus ->
+                                // 焦点真落进输入框后再补一次全选：选区可能在焦点
+                                // 交接过程中被收成末尾光标，那样预填的 0 会留在
+                                // 前面，输入 -10 就变成 -100
+                                if (focus.isFocused && !didAutoSelect) {
+                                    didAutoSelect = true
+                                    text = text.copy(selection = TextRange(0, text.text.length))
+                                }
+                            }
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MdThemeSurface)
+                            .border(1.dp, CardStroke, RoundedCornerShape(8.dp))
+                            .padding(vertical = 10.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "px",
+                        fontSize = 13.sp,
+                        color = MdThemeOnSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { submit() }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 /**

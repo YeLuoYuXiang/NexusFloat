@@ -91,6 +91,18 @@ public final class Constants {
          */
         public static final String KEY_SHOW_CHARGING_ONLY = "show_charging_only";
         public static final String KEY_UPDATED_AT = "updated_at";
+        /**
+         * 设置表的修订号（v1.9.4）。
+         *
+         * 为什么需要它：设置有三条读取通道（RemotePreferences / ContentProvider 快照 /
+         * Settings.Global），三条各自独立演进。读侧原来的优先级是写死的「Remote 最高」，
+         * 而 Remote 只在模块自己的进程被框架注入时才会更新；一旦注入失效，里面留下的
+         * 旧值就会永远压住另外两条通道，表现是「改什么设置都没反应」，而悬浮窗本身照常显示。
+         *
+         * 值是一个毫秒时间戳，由写侧每次发布时盖上，三条通道都带同一份。
+         * 读侧比大小取最新的那一套，比「按固定优先级试」可靠。
+         */
+        public static final String KEY_PREFS_REV = "prefs_rev";
         /** openRemoteFile 备用通道（跟 RemotePreferences 双写） */
         public static final String GPU_FREQ_FILE = "gpu_freq.txt";
 
@@ -474,6 +486,52 @@ public final class Constants {
         public static final int OFFSET_MIN_PX = -400;
         public static final int OFFSET_MAX_PX = 400;
         public static final int OFFSET_STEP_PX = 2;
+
+        /**
+         * 「显示在屏幕底部」开关：打开后悬浮窗的定位基准从屏幕顶端换成屏幕底部，
+         * 监视条落在系统手势栏（导航栏）那一带。
+         *
+         * 为什么需要它：位置微调只能相对顶端挪 ±400px，但很多机型顶端根本没法待——
+         * 挖孔/灵动岛、圆角、居中打孔会把监视条切掉一半；还有第三方状态栏会把
+         * 时间、电量排到屏幕最上面一整行，往上挪无可挪。而底部手势栏那一带常年空着
+         * （手势条就一条细线，压在上面看不出来），单手拿手机时眼睛也离底部更近。
+         *
+         * 之所以做成开关而不是直接把基准改成底部：默认必须保持 false，
+         * 老用户升级后读不到这个键就走 false，界面和现在一模一样，不会有人的
+         * 监视条在升级后突然跳到屏幕下方。
+         *
+         * 偏移量的语义在两种基准下完全一致（水平正值向右、垂直正值向下），
+         * 所以切换开关时不用清空原有的 x/y。
+         */
+        public static final String KEY_ANCHOR_BOTTOM = "anchor_bottom";
+        public static final String LABEL_ANCHOR_BOTTOM = "显示在屏幕底部";
+
+        /**
+         * 防烧屏微移：每隔 BURN_IN_INTERVAL_MS 在 ±BURN_IN_AMPLITUDE_PX 内随机挪一下，
+         * 轮换点亮的像素。
+         *
+         * 为什么需要它：监视条是常驻的固定像素——小字号、高对比、位置一秒不变，
+         * 同一批子像素被长期点亮。OLED 上这就是教科书式的烧屏条件，几个月后屏幕上
+         * 会留下「一个淡淡的监视条」的残影，而且不可逆。
+         *
+         * 为什么是「微移」而不是「隐藏一会儿」或「调低亮度」：后者都会让人真的看不见
+         * 数据，而 2px 的位移在 400+ dpi 的屏幕上几乎察觉不到，却足以让文字的笔画边缘
+         * 落在不同的子像素上，把老化平摊开。
+         *
+         * 为什么 45 秒：OLED 的老化是按累计点亮时长走的，几十秒一轮就够把同一像素的
+         * 占空比打散；更频繁只是徒增 updateViewLayout 的次数，没有额外收益。
+         *
+         * 为什么默认关：老用户升级后读不到这个键就走 false，监视条一动不动，行为
+         * 和升级前一模一样。默认开着的话，那些本来就在盯像素级细节的人会把「文字
+         * 每隔一会儿挪一点」当成渲染 bug 或抖动来报，而这种问题极难解释清楚。
+         * 有烧屏顾虑的人自己打开就行，界面上写清了多久动一次、动多少。
+         */
+        public static final String KEY_BURN_IN_PROTECT = "burn_in_protect";
+        public static final String LABEL_BURN_IN_PROTECT = "防烧屏微移";
+        /** 微移幅度（像素，单边最大值） */
+        public static final int BURN_IN_AMPLITUDE_PX = 2;
+        /** 微移间隔（毫秒） */
+        public static final long BURN_IN_INTERVAL_MS = 45_000L;
 
         /**
          * CPU / GPU 柱状图开关：在数值旁边画一根占用率竖条。

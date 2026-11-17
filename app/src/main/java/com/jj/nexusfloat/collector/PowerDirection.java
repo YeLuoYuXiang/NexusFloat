@@ -3,81 +3,45 @@ package com.jj.nexusfloat.collector;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.os.BatteryManager;
 
 import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.utils.LogUtils;
 
 /**
- * 判定电池是在进电还是出电，以及电流符号的约定。
+ * 判定电池是在进电还是出电。
  *
- * 这个类取代了原来散在两处的实现（PerformanceCollector 里一套、BatteryGauge 里
- * 另一套）。两套逻辑不一致本身就是符号"时不时反"的一个来源：同一个读数，
- * 监视条算正、记录页算负。
+ * 监视条和记录页都调这里，保证两处显示的功率符号一致。
  *
- * ## 为什么原来会反
+ * ## 判定依据
  *
- * 老实现全靠推断：看 status 节点说什么，再拿电流符号去对。推断链有三个断点。
+ * 主要看内核的电流符号。Android power_supply ABI 规定：current_now 负数表示
+ * 电池在放电（出电），正数表示在充电（进电）。这是内核直接报告的实测方向，
+ * 不需要推断，也不需要任何标定。
  *
- * 一是标定可能压根不发生。老代码默认「负=放电」，只有在「status 是 Discharging
- * 且电流绝对值 ≥ 0.3A」时才学一次真实约定。可静置时电流常在 0.02–0.15A，
- * 永远够不到 0.3A 这个门槛；用户要是在充电状态下开机，也永远遇不到
- * Discharging 样本。结果就是整段使用期都拿默认值猜——碰上「正=放电」的驱动
- * （部分 MTK / 三星）就全程反。
+ * 这个依据能覆盖几个容易搞错的场景：
  *
- * 二是学一次就锁死。dischargeSignKnown 一旦为真就不再复核，可驱动行为、
- * 电源路径切换、甚至节点本身换了一个（battery 读不到回落到 bms）都可能让
- * 符号约定变。锁死意味着错一次错到底。
+ * 插着充电器打游戏、功耗超过充电器输出时，电池在倒贴。内核的 status 节点
+ * 这时候仍然报 Charging（充电器确实接着），靠状态判断会误认为是充电；
+ * 但 current_now 会变成负值，符号直接说明了真相。
  *
- * 三是 usb/status 混进了候选表。它报的是 USB 端口方向，不是电池相对电源的
- * 方向。插着充电器时它永远说 Charging，哪怕电池在倒贴。
+ * 没接充电器时电池只可能放电，这条也是硬事实，作为兜底。
  *
- * 加上老实现把标定结果只放内存，重启就丢，于是每次开机到第一次够大的放电样本
- * 之间又回到默认值——这就是"不定时"反的来历。
+ * ## 为什么不看 status
  *
- * ## 现在的判定顺序
- *
- * 一、物理约束优先。没接外接电源时，电池只可能放电，不存在"被充电"的可能。
- *     这条不依赖任何驱动报告，是硬事实，能兜住后面所有推断失败。
- * 二、status 节点明确报 Discharging → 放电。报 Charging/Full 时还要看电流：
- *     供电不足时电池在倒贴，内核却仍可能说 Charging。
- * 三、电流符号。这里用持续校正过的约定，不是一次性学习。
- *
- * ## 符号约定的持续校正
- *
- * 只要 status 与电流同时可信就复核一次：status 说放电、电流够大，
- * 那电流的符号就是"放电方向"。不一致就立刻纠正，不再锁死。
- * 校正结果持久化，重启后直接复用，开机第一拍就是对的。
+ * status 反映的是「充电器与电池之间的连接关系」，不是「电池净能量流向」。
+ * 供电不足、涓流、电源路径切换这些阶段它都会给出误导性的值。只有电流
+ * 不可信（读不到、或者数值太小）时才退回用它。
  */
 public final class PowerDirection {
 
     private static final String TAG = "PowerDirection";
 
-    /** 持久化键：放电方向的电流符号（+1 表示正数=放电，-1 表示负数=放电） */
-    private static final String PREF_DISCHARGE_SIGN = "battery_discharge_sign";
-    private static final String PREF_NAME = "battery_direction";
-
-    /**
-     * 符号约定的版本号。
-     *
-     * 采信规则一变就要加一：老版本按旧规则写下的值可能是错的，必须丢弃重学。
-     *
-     * 2 = 1.9.6 起。1.9.5 的 calibrate 会在充电时采信电源路径切换的噪声样本，
-     * 把约定写反并持久化——这是「充电时符号反」的直接原因。升到 2 之后，
-     * 读到版本号不是 2 的存储值就整条丢掉，回落到默认约定重新学。
-     */
-    private static final String PREF_SIGN_VERSION = "battery_discharge_sign_version";
-    private static final int SIGN_VERSION = 3;
-
     /**
      * 判定的输入。
-     *
-     * plugged 来自 EXTRA_PLUGGED，是硬件事实：>=0 表示接了外接电源。
-     * 它和 status 是两回事——status 是内核的推断，plugged 是物理连接状态。
      */
     public static final class Input {
-        /** 电池电流（A），带符号 */
+        /** 电池电流（A），带内核给出的符号：正进负出 */
         public float currentA;
         /** status 节点原文，读不到是 null */
         public String status;
@@ -85,8 +49,6 @@ public final class PowerDirection {
         public int plugged;
         /** 系统报的充电状态（BatteryManager.BATTERY_STATUS_*） */
         public int sysStatus = BatteryManager.BATTERY_STATUS_UNKNOWN;
-        /** 电量百分比（0–100），读不到是 -1。用来判断电量趋势 */
-        public int capacity = -1;
     }
 
     /** 判定结果 */
@@ -99,60 +61,7 @@ public final class PowerDirection {
         public float currentA;
     }
 
-    /**
-     * 电量趋势的观察窗口（毫秒）。
-     *
-     * 电池容量大，即使净放电 3W 也要好几分钟才掉一格，所以窗口不能太短。
-     * 90 秒是个折中：短于这个数看不出变化，太长则响应迟钝。
-     */
-    private static final long TREND_WINDOW_MS = 90_000L;
-
-    /**
-     * 每个调用方各存一份窗口起点。
-     *
-     * 监视条每秒调一次、记录页按需调，共用一套状态会互相踩窗口计时，
-     * 两边的趋势都算不准。用调用方传进来的 key 分桶就没这个问题。
-     */
-    private static final java.util.Map<String, TrendState> TRENDS =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    /** 一个调用方的趋势状态 */
-    private static final class TrendState {
-        int startPct = -1;
-        long startMs;
-    }
-
     private PowerDirection() {
-    }
-
-    /**
-     * 电量趋势：+1 上升、-1 下降、0 看不出来。
-     *
-     * 这是识别「插着充电器但电池在倒贴」的关键判据。内核的 status 在这种场景
-     * 仍然报 Charging（充电器确实接着），靠它区分不出来；而电量是电池净能量
-     * 的真实反映，在跌就说明净流出，不管充电器接没接。
-     *
-     * 不依赖电流符号，不需要标定，也不关心机型差异。
-     */
-    private static int capacityTrend(String caller, int capacity, long now) {
-        if (capacity < 0) {
-            return 0;
-        }
-        TrendState st = TRENDS.computeIfAbsent(caller, k -> new TrendState());
-        if (st.startPct < 0) {
-            st.startPct = capacity;
-            st.startMs = now;
-            return 0;
-        }
-        long elapsed = now - st.startMs;
-        if (elapsed < TREND_WINDOW_MS) {
-            return 0;
-        }
-        int delta = capacity - st.startPct;
-        // 窗口到期，滚动到新的起点
-        st.startPct = capacity;
-        st.startMs = now;
-        return Integer.compare(delta, 0);
     }
 
     /**
@@ -162,16 +71,9 @@ public final class PowerDirection {
      * 方法内部按判定出的方向补上符号。
      */
     public static Result resolve(Context context, Input in, float absPowerW) {
-        return resolve(context, in, absPowerW, DEFAULT_CALLER);
-    }
-
-    /** 带调用方标识的全量判定 */
-    public static Result resolve(Context context, Input in, float absPowerW, String caller) {
         Result r = new Result();
-        r.discharging = isDischarging(context, in, caller);
+        r.discharging = isDischarging(context, in);
 
-        // 电流符号统一成「正进负出」的语义，与判定结果对齐。
-        // 不管驱动原来怎么给，对外只暴露这一种约定，上层不用再关心
         float absA = Math.abs(in.currentA);
         r.currentA = r.discharging ? -absA : absA;
 
@@ -181,280 +83,39 @@ public final class PowerDirection {
     }
 
     /**
-     * 是不是在放电。判定顺序见类注释。
+     * 是不是在放电。
      */
     public static boolean isDischarging(Context context, Input in) {
-        return isDischarging(context, in, DEFAULT_CALLER);
-    }
-
-    /** 默认调用方标识。没特别指定就都用它，行为跟以前一致 */
-    private static final String DEFAULT_CALLER = "default";
-
-    /**
-     * 带调用方标识的判定。
-     *
-     * caller 只用来隔离电量趋势的窗口状态，不参与方向判断本身
-     */
-    public static boolean isDischarging(Context context, Input in, String caller) {
-        calibrate(context, in);
-
-        float absA = Math.abs(in.currentA);
-        boolean currentTrustworthy = absA >= Constants.Battery.CURRENT_CREDIBLE_A;
-        int trend = capacityTrend(caller, in.capacity, System.currentTimeMillis());
-
-        // 从正常充电的样本反推符号约定，让倒贴检测不用等拔线就能用
-        calibrateFromCharging(context, in, trend);
-
-        // ---- 1. 没接任何外接电源 → 必定放电 ----
+        // ---- 1. 没接外接电源 → 必定放电 ----
         //
-        // 硬件事实，不需要任何推断。电池在没接电源时不可能被充电
+        // 不需要判断，没有电源输入时电池只可能出电
         if (in.plugged <= 0) {
             return true;
         }
 
-        // ---- 2. status 明确说放电 → 放电 ----
-        if (in.status != null
-                && Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
-            return true;
+        // ---- 2. 电流符号 ----
+        //
+        // 这是主判据。内核报告的电流方向是实测值，比 status 可靠：
+        // 插着充电器打游戏、功耗超过充电器输出时，status 还报 Charging，
+        // 但 current_now 已经变成负数了
+        if (Math.abs(in.currentA) >= Constants.Battery.CURRENT_CREDIBLE_A) {
+            return in.currentA < 0f;
         }
 
-        // ---- 3. status 说充电 / 已满 ----
-        //
-        // 内核说充电，正常情况下信它。但要认出一种例外：插着充电器打游戏、
-        // 功耗超过充电器输出时，电池在倒贴放电，内核仍报 Charging
-        // （因为充电器确实接着）。
-        //
-        // 判法是看电流方向是否符合「进电」。这需要知道符号约定。
-        // 约定没确认过时不敢用——那时候「哪边是进电」是猜的，
-        // 拿猜的去推翻内核结论就会把正常充电判反（1.9.6 的教训）。
-        if (in.status != null
-                && (Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
-                    || Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status))) {
-            // 电量在跌 → 确定在放电，压过 status。
-            //
-            // 这是倒贴场景的最终判据：内核说充电、充电器也接着，但电池净能量
-            // 在减少。边充边玩功耗超过充电器输出时就是这样
-            if (trend < 0) {
+        // ---- 3. 电流太小或读不到，退回 status ----
+        if (in.status != null) {
+            if (Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
                 return true;
             }
-            // 电量在涨 → 确定在充电
-            if (trend > 0) {
+            if (Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
+                    || Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status)) {
                 return false;
             }
-            // 看不出来（窗口还没满，或者电量没动）时，退回电流方向判断
-            if (currentTrustworthy && dischargeSignKnown(context)) {
-                int sign = dischargeSign(context);
-                // 进电方向 = -sign；电流符号等于进电方向 → 在充电
-                boolean currentInward = sign > 0 ? in.currentA < 0f : in.currentA > 0f;
-                return !currentInward;
-            }
-            return false;
         }
 
-        // ---- 4. status 没有结论时，用电流方向 ----
-        //
-        // 只有内核没说清（节点读不到、或者报 Not charging / Unknown）才走到这里。
-        // 此时用符号约定判方向；约定没标定过就按 Android 标准（负为放电）
-        if (currentTrustworthy) {
-            int sign = dischargeSign(context);
-            boolean outward = sign > 0 ? in.currentA > 0f : in.currentA < 0f;
-            return outward;
-        }
-
-        // ---- 5. 兜底：接了电源、又没有放电证据 → 当作在充电 ----
-        return false;
-    }
-
-    /**
-     * 从「正常充电」的样本反推符号约定。
-     *
-     * 内核说 Charging、电流也够大、而且电量确实在涨（或者至少没跌），
-     * 这就是一次可信的充电样本。此时电流的符号就是进电方向，
-     * 放电方向取反即可。
-     *
-     * 这条比「必须拔线才能标定」宽松得多——只要有过一次正常充电就学到了，
-     * 不需要用户拔线，也不需要等电量变化窗口。
-     *
-     * 采信条件同样要求连续几拍一致，避免涓流阶段的抖动。
-     */
-    private static void calibrateFromCharging(Context context, Input in, int trend) {
-        if (in.status == null
-                || (!Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
-                    && !Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status))) {
-            pendingChargeCount = 0;
-            return;
-        }
-        // 电量在跌，说明这根本不是充电样本
-        if (trend < 0) {
-            pendingChargeCount = 0;
-            return;
-        }
-        // 电流要够大才看得出方向
-        if (Math.abs(in.currentA) < Constants.Battery.DISCHARGE_HINT_A) {
-            pendingChargeCount = 0;
-            return;
-        }
-
-        // 充电时电流符号 == 进电方向，所以放电方向是它的反面
-        int chargeSign = in.currentA > 0f ? 1 : -1;
-        int observed = -chargeSign;
-
-        if (observed == pendingChargeSign) {
-            pendingChargeCount++;
-        } else {
-            pendingChargeSign = observed;
-            pendingChargeCount = 1;
-        }
-        if (pendingChargeCount < SIGN_CONFIRM_TICKS) {
-            return;
-        }
-        int stored = dischargeSign(context);
-        if (observed != stored || !dischargeSignKnown(context)) {
-            writeDischargeSign(context, observed);
-            LogUtils.i(TAG + " discharge sign from charging: " + observed);
-        }
-        pendingChargeCount = 0;
-    }
-
-    /** 从充电样本反推时的连续计数 */
-    private static int pendingChargeSign;
-    private static int pendingChargeCount;
-
-    /**
-     * 「连续一致」的拍数要求。
-     *
-     * 电源路径切换、涓流、充满时，内核的 status 会短暂报 Discharging，
-     * 电流却还在进电。这类噪声样本只有一两拍。要求连续 N 拍方向一致，
-     * 就能把它们滤掉，同时不误伤真实放电（真实放电会持续很久）。
-     */
-    private static final int SIGN_CONFIRM_TICKS = 3;
-
-    /** 上一拍观察到的放电符号，以及连续一致的拍数 */
-    private static int pendingSign;
-    private static int pendingCount;
-
-    /**
-     * 校正「放电时电流是正是负」。
-     *
-     * 样本是「status 明确报 Discharging」——内核自己说在放电，这个判断不依赖
-     * 符号约定，所以样本本身是可信的。电流的符号就是放电方向。
-     *
-     * 两个防污染措施：
-     *
-     * 一是要求连续 N 拍观察到同一个符号。电源路径切换时内核会短暂误报
-     * Discharging，那种噪声样本方向不固定、持续也短，连续三拍一致的要求
-     * 能滤掉绝大部分。
-     *
-     * 二是不接电源时门槛更低（静置噪声小，方向确定）；接电源时要求电流更大，
-     * 因为那种场景下小电流样本更可能是噪声。
-     *
-     * 这样既能在「没接电源」时快速学到约定，也能在「接电源但电池在倒贴」
-     * 时学到——后者正是之前学不到、导致倒贴检测失效的原因。
-     */
-    private static void calibrate(Context context, Input in) {
-        // 只采信内核明确说在放电的样本
-        if (in.status == null
-                || !Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
-            pendingCount = 0;
-            return;
-        }
-        // 接电源时要更大的电流才算真放电（倒贴的电流通常不小）
-        float threshold = in.plugged > 0
-                ? Constants.Battery.DISCHARGE_HINT_A
-                : Constants.Battery.CURRENT_CREDIBLE_A;
-        if (Math.abs(in.currentA) < threshold) {
-            pendingCount = 0;
-            return;
-        }
-
-        int observed = in.currentA > 0f ? 1 : -1;
-        if (observed == pendingSign) {
-            pendingCount++;
-        } else {
-            pendingSign = observed;
-            pendingCount = 1;
-        }
-        if (pendingCount < SIGN_CONFIRM_TICKS) {
-            return;
-        }
-        // 连续确认够了，采信
-        int stored = dischargeSign(context);
-        if (observed != stored || !dischargeSignKnown(context)) {
-            writeDischargeSign(context, observed);
-            LogUtils.i(TAG + " discharge sign confirmed: " + observed);
-        }
-        pendingCount = 0;
-    }
-
-    /**
-     * 符号约定确认过没有。
-     *
-     * 「确认过」指的是真的从一次没接电源的放电样本里学到过，
-     * 而不是还在用默认值。未确认时不能拿电流去推翻内核的状态结论
-     */
-    private static boolean dischargeSignKnown(Context context) {
-        try {
-            SharedPreferences p = prefs(context);
-            if (p == null) {
-                return false;
-            }
-            if (p.getInt(PREF_SIGN_VERSION, 0) != SIGN_VERSION) {
-                return false;
-            }
-            return p.contains(PREF_DISCHARGE_SIGN);
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    /**
-     * 读持久化的放电符号约定；没有记录、或记录来自旧版规则时按 Android 标准
-     * （负为放电）。
-     *
-     * 版本号不匹配就丢掉旧值——这是清掉 1.9.5 污染的关键。
-     */
-    private static int dischargeSign(Context context) {
-        try {
-            SharedPreferences p = prefs(context);
-            if (p == null) {
-                return Constants.Battery.DISCHARGE_SIGN_DEFAULT;
-            }
-            int version = p.getInt(PREF_SIGN_VERSION, 0);
-            if (version != SIGN_VERSION) {
-                // 旧版规则写下的值不可信，丢掉
-                if (p.contains(PREF_DISCHARGE_SIGN)) {
-                    p.edit().remove(PREF_DISCHARGE_SIGN).apply();
-                    LogUtils.i(TAG + " dropped stale discharge sign, ver " + version);
-                }
-                return Constants.Battery.DISCHARGE_SIGN_DEFAULT;
-            }
-            return p.getInt(PREF_DISCHARGE_SIGN, Constants.Battery.DISCHARGE_SIGN_DEFAULT);
-        } catch (Throwable t) {
-            return Constants.Battery.DISCHARGE_SIGN_DEFAULT;
-        }
-    }
-
-    private static void writeDischargeSign(Context context, int sign) {
-        try {
-            SharedPreferences p = prefs(context);
-            if (p == null) {
-                return;
-            }
-            // 一起写版本号：以后采信规则再改，靠它把这些值作废
-            p.edit()
-                    .putInt(PREF_DISCHARGE_SIGN, sign)
-                    .putInt(PREF_SIGN_VERSION, SIGN_VERSION)
-                    .apply();
-        } catch (Throwable t) {
-            LogUtils.w(TAG + " write sign failed", t);
-        }
-    }
-
-    private static SharedPreferences prefs(Context context) {
-        if (context == null) {
-            return null;
-        }
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+        // ---- 4. 兜底：按系统报的充电状态 ----
+        return in.sysStatus != BatteryManager.BATTERY_STATUS_CHARGING
+                && in.sysStatus != BatteryManager.BATTERY_STATUS_FULL;
     }
 
     /**
@@ -475,29 +136,10 @@ public final class PowerDirection {
                 in.plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
                 in.sysStatus = intent.getIntExtra(BatteryManager.EXTRA_STATUS,
                         BatteryManager.BATTERY_STATUS_UNKNOWN);
-                in.capacity = readCapacity(intent);
             }
         } catch (Throwable t) {
             LogUtils.w(TAG + " read battery intent failed", t);
         }
         return in;
-    }
-
-    /**
-     * 从电池广播取电量百分比。
-     *
-     * EXTRA_LEVEL 是相对 EXTRA_SCALE 的原始值，多数机型 scale 是 100，
-     * 但也有用别的量程的，所以要按比例换算，不能直接当百分比
-     */
-    public static int readCapacity(Intent intent) {
-        if (intent == null) {
-            return -1;
-        }
-        int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
-        int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
-        if (level < 0 || scale <= 0) {
-            return -1;
-        }
-        return Math.round(level * 100f / scale);
     }
 }

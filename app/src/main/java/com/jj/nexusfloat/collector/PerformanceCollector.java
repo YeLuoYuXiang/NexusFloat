@@ -99,8 +99,6 @@ public class PerformanceCollector {
     private int lastBatteryStatus = BatteryManager.BATTERY_STATUS_UNKNOWN;
     /** 外接电源状态（v1.9.5）：0 表示没接任何充电器，非 0 表示接了 */
     private int lastBatteryPlugged = 0;
-    /** 电量百分比，-1 表示还没收到广播。用于识别「充电时电池在倒贴」 */
-    private int lastBatteryCapacity = -1;
 
     private long lastFpsTime = 0;
     private int currentFps = 0;
@@ -254,7 +252,6 @@ public class PerformanceCollector {
                 lastBatteryStatus = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
                 // 外接电源是硬件事实，方向判定拿它做第一级约束（v1.9.5）
                 lastBatteryPlugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-                lastBatteryCapacity = PowerDirection.readCapacity(intent);
             }
         }
     };
@@ -299,7 +296,7 @@ public class PerformanceCollector {
                 nodeStatus = SysfsReader.root().readBatteryStatus();
             }
             in.status = nodeStatus;
-            return !PowerDirection.isDischarging(context, in, "monitor");
+            return !PowerDirection.isDischarging(context, in);
         } catch (Throwable t) {
             LogUtils.w("isChargingNow failed", t);
             return false;
@@ -615,7 +612,6 @@ public class PerformanceCollector {
         in.status = readBatteryStatusText();
         in.plugged = lastBatteryPlugged;
         in.sysStatus = lastBatteryStatus;
-        in.capacity = lastBatteryCapacity;
 
         float absCurrentA = Math.abs(in.currentA);
         float absPower = powerTracker.resolve(
@@ -630,7 +626,7 @@ public class PerformanceCollector {
             absPower *= Constants.Modules.DUAL_CELL_MULTIPLIER;
         }
 
-        PowerDirection.Result dir = PowerDirection.resolve(context, in, absPower, "monitor");
+        PowerDirection.Result dir = PowerDirection.resolve(context, in, absPower);
         data.isCharging = !dir.discharging;
 
         if (absCurrentA > 0) {

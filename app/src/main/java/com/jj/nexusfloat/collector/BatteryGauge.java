@@ -66,12 +66,11 @@ public final class BatteryGauge {
         PowerDirection.Input battery = PowerDirection.readInputFromBattery(context);
         in.plugged = battery.plugged;
         in.sysStatus = battery.sysStatus;
-        in.capacity = battery.capacity;
 
         float power = powerTracker.resolve(Math.abs(currentA), voltageV,
                 () -> SysfsReader.direct().readBatteryPowerW());
 
-        PowerDirection.Result dir = PowerDirection.resolve(context, in, power, "frame");
+        PowerDirection.Result dir = PowerDirection.resolve(context, in, power);
         r.discharging = dir.discharging;
         r.currentA = dir.currentA;
         r.powerW = dir.powerW;

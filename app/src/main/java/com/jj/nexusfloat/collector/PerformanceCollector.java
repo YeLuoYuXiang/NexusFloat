@@ -279,24 +279,15 @@ public class PerformanceCollector {
             return false;
         }
         try {
-            // 走统一的方向判定（v1.9.5）。
+            // 走统一的方向判定（v1.9.11）：看 power_now 的符号。
             //
-            // 原来这里只看 status 节点，既不查外接电源也不看电流，和功率显示的
-            // 判定不是同一套——于是可能出现「功率显示负值（在放电），但监视条
-            // 因为仅充电时显示开着还在显示」这种自相矛盾的状态。
-            //
-            // 现在两处共用 PowerDirection，显示与否和功率符号必然一致
-            PowerDirection.Input in = PowerDirection.readInputFromBattery(context);
-            in.currentA = SysfsReader.direct().readBatteryCurrentA();
-            if (in.currentA == 0f) {
-                in.currentA = SysfsReader.root().readBatteryCurrentA();
+            // 和监视条上的功率显示共用同一处实现，所以「功率显示负值」和
+            // 「监视条还在显示」这种自相矛盾的状态不会出现
+            float signedPower = SysfsReader.direct().readBatteryPowerW();
+            if (signedPower == 0f) {
+                signedPower = SysfsReader.root().readBatteryPowerW();
             }
-            String nodeStatus = SysfsReader.direct().readBatteryStatus();
-            if (nodeStatus == null) {
-                nodeStatus = SysfsReader.root().readBatteryStatus();
-            }
-            in.status = nodeStatus;
-            return !PowerDirection.isDischarging(context, in);
+            return !PowerDirection.resolve(context, signedPower).discharging;
         } catch (Throwable t) {
             LogUtils.w("isChargingNow failed", t);
             return false;
@@ -599,46 +590,38 @@ public class PerformanceCollector {
 
         boolean dualCell = NexusBridge.isDualCellEnabled();
 
-        // 方向判定统一交给 PowerDirection（v1.9.5）。
+        // 功率只读 power_now，符号就是方向（v1.9.11）。
         //
-        // 原来这里自己实现了一套「看 status + 猜电流符号」的逻辑，帧记录那边
-        // 又实现了另一套，两边对同一组读数可能给出相反的结论。现在只有一处实现，
-        // 监视条和记录页必然一致。
+        // 之前是「电流 × 电压 优先、power_now 兜底」，两条都取绝对值，
+        // 方向另外靠推断。推断走过 status 节点、电流符号、电量趋势，都不成立：
+        // 那些都不是「电池净功率」的直接测量。
         //
-        // 判定的第一级依据是外接电源（EXTRA_PLUGGED）这个硬件事实，不再只靠驱动
-        // 报告的 status——那玩意在不少机型上漏报、错报，正是符号反向的来源
-        PowerDirection.Input in = new PowerDirection.Input();
-        in.currentA = readBatteryCurrentA();
-        in.status = readBatteryStatusText();
-        in.plugged = lastBatteryPlugged;
-        in.sysStatus = lastBatteryStatus;
-
-        float absCurrentA = Math.abs(in.currentA);
-        float absPower = powerTracker.resolve(
-                absCurrentA,
-                readBatteryVoltageV(),
-                () -> SysfsReader.direct().readBatteryPowerW());
-
-        // 双电芯并联时 current_now 多半只报单颗电芯的电流，故显示值翻倍。
-        // 倍率作用在 resolve 的结果上，三条来源（电流×电压 / power_now / 陈旧值）
-        // 都会被翻倍，不会因为来源切换而忽大忽小
-        if (dualCell && absPower > 0) {
-            absPower *= Constants.Modules.DUAL_CELL_MULTIPLIER;
+        // power_now 的符号本身就是答案，负值放电、正值充电。读它必须带符号，
+        // 否则等于把方向信息扔掉（之前一直失败的根因就是槽位漏了 keepSign）
+        float signedPower = powerTracker.resolve(
+                SysfsReader.direct().readBatteryPowerW());
+        if (signedPower == 0f) {
+            // 直读不到再试 root
+            signedPower = powerTracker.resolve(SysfsReader.root().readBatteryPowerW());
         }
 
-        PowerDirection.Result dir = PowerDirection.resolve(context, in, absPower);
-        data.isCharging = !dir.discharging;
+        // 双电芯并联时功率翻倍。倍率作用在带符号的值上，符号不变
+        if (dualCell && signedPower != 0f) {
+            signedPower *= Constants.Modules.DUAL_CELL_MULTIPLIER;
+        }
 
-        if (absCurrentA > 0) {
-            float ma = absCurrentA * 1000f;
+        PowerDirection.Result dir = PowerDirection.resolve(context, signedPower);
+        data.isCharging = !dir.discharging;
+        data.batteryPowerW = dir.powerW;
+
+        // 电流仍按原路径读，符号跟随功率方向，保证两列一致
+        float currentA = readBatteryCurrentA();
+        if (Math.abs(currentA) > 0f) {
+            float ma = Math.abs(currentA) * 1000f;
             if (dualCell) {
                 ma *= Constants.Modules.DUAL_CELL_MULTIPLIER;
             }
             data.batteryCurrentMa = dir.discharging ? -ma : ma;
-        }
-
-        if (absPower > 0) {
-            data.batteryPowerW = dir.discharging ? -absPower : absPower;
         }
     }
 

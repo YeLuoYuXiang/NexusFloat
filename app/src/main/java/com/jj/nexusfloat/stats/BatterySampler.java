@@ -464,9 +464,12 @@ public final class BatterySampler {
         float magnitudeMa = effCurrentA * 1000f;
         s.currentMa = Math.round(charging ? magnitudeMa : -magnitudeMa);
 
-        // 功率状态机照走（沿用值也过一遍，保证突变守卫对它是连续的）
-        float powerW = powerTracker.resolve(effCurrentA, voltageV, this::readPowerNowW);
-        s.powerW = charging ? powerW : -powerW;
+        // 功率直接读 power_now 的带符号值（v1.9.11）。
+        //
+        // 统计侧同样只看这个符号决定充放电，不再自己用「电流×电压」拼。
+        // 沿用值也过一遍状态机，保证突变守卫对它是连续的
+        float signedPowerW = powerTracker.resolve(readPowerNowW());
+        s.powerW = signedPowerW;
 
         // power_known：这一拍的功率/电流是不是**本拍真读到**的。
         // 读不到、被区间拒掉、沿用旧值都记 false：

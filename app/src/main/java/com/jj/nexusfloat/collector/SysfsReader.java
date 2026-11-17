@@ -87,8 +87,12 @@ public final class SysfsReader {
                     true);
             this.batteryVoltage = new ScaledSlot(Constants.Battery.VOLTAGE_PATHS,
                     UNIT_MICRO_MILLI, Constants.Battery.VOLTAGE_MIN_V, Constants.Battery.VOLTAGE_MAX_V);
+            // power_now 保留符号（v1.9.11）：内核给的符号就是充放电方向，
+            // 负值表示电池在放电、正值表示在充电。这一位符号是功率方向判定的
+            // 全部依据，取绝对值等于把答案扔掉
             this.batteryPower = new ScaledSlot(Constants.Battery.POWER_PATHS,
-                    UNIT_MICRO, Constants.Battery.POWER_MIN_W, Constants.Battery.POWER_MAX_W);
+                    UNIT_MICRO, Constants.Battery.POWER_MIN_W, Constants.Battery.POWER_MAX_W,
+                    0f, true);
         }
 
         /** 电池电流（A），带符号：正是充电、负是放电；读不到就是 0 */

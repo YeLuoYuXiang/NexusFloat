@@ -2869,6 +2869,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.11",
+        "功率读数全部改为直接读内核的 power_now 节点，符号即方向：负值放电、正值充电。" +
+                "修复了读 power_now 时符号被丢掉的问题——之前那个槽位构造漏了一个保留" +
+                "符号的参数，读数一律变成正数，方向信息完全丢失，上层只能靠推断，而推断" +
+                "怎么改都不对。一并移除用状态节点、电流符号、电量趋势判断方向的全部逻辑。" +
+                "功率方向现在只有一个依据。"
+    ),
+    ChangelogEntry(
         "1.9.10",
         "修复插着充电器玩游戏、耗电大于充电功率时功率仍显示正值的问题。判定改为" +
                 "直接读内核电流的符号：负值是电池在放电，正值在充电。这是内核报告的" +

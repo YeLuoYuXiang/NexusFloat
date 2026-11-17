@@ -49,32 +49,21 @@ public final class BatteryGauge {
     public Result sample() {
         Result r = new Result();
 
-        float currentA = readCurrentA();
-        float voltageV = readVoltageV();
+        // 与监视条一致：只读 power_now 的带符号值（v1.9.11）
+        float signedPower = powerTracker.resolve(
+                SysfsReader.direct().readBatteryPowerW());
+        if (signedPower == 0f) {
+            signedPower = powerTracker.resolve(SysfsReader.root().readBatteryPowerW());
+        }
 
-        // 方向判定统一交给 PowerDirection（v1.9.5）。
-        //
-        // 这里原来是自己写的一套：硬编码「负=放电」，没有任何校正。
-        // 而监视条那边有一套带标定的实现，两边对同一组读数可能给出相反结论——
-        // 同一个数在监视条上是 +8W、在记录页是 -8W，用户看着就是「符号反了」。
-        //
-        // 现在全项目只有 PowerDirection 一处实现，两处显示必然一致
-        PowerDirection.Input in = new PowerDirection.Input();
-        in.currentA = currentA;
-        in.status = readStatusText();
-        // 外接电源状态从系统广播取（硬件事实，不依赖 sysfs 权限）
-        PowerDirection.Input battery = PowerDirection.readInputFromBattery(context);
-        in.plugged = battery.plugged;
-        in.sysStatus = battery.sysStatus;
-
-        float power = powerTracker.resolve(Math.abs(currentA), voltageV,
-                () -> SysfsReader.direct().readBatteryPowerW());
-
-        PowerDirection.Result dir = PowerDirection.resolve(context, in, power);
+        PowerDirection.Result dir = PowerDirection.resolve(context, signedPower);
         r.discharging = dir.discharging;
-        r.currentA = dir.currentA;
         r.powerW = dir.powerW;
-        r.voltageV = voltageV;
+
+        float currentA = readCurrentA();
+        float absA = Math.abs(currentA);
+        r.currentA = dir.discharging ? -absA : absA;
+        r.voltageV = readVoltageV();
         return r;
     }
 

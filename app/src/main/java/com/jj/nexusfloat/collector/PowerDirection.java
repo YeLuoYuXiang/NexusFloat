@@ -9,137 +9,77 @@ import com.jj.nexusfloat.constant.Constants;
 import com.jj.nexusfloat.utils.LogUtils;
 
 /**
- * 判定电池是在进电还是出电。
+ * 功率方向的唯一依据：内核 power_now 节点的符号。
  *
- * 监视条和记录页都调这里，保证两处显示的功率符号一致。
+ * ## 只看 power_now
  *
- * ## 判定依据
+ * 早期版本靠 status 节点、电流符号、电量趋势去推断方向，都不对。status 反映的是
+ * 「充电器接着没有」，不是「电池在进电还是在出电」——插着充电器打游戏、功耗超过
+ * 充电器输出时，它照样报 Charging。电流符号要看驱动约定，还有反着给的机型。
+ * 电量趋势太慢，等掉一格要好几分钟。
  *
- * 主要看内核的电流符号。Android power_supply ABI 规定：current_now 负数表示
- * 电池在放电（出电），正数表示在充电（进电）。这是内核直接报告的实测方向，
- * 不需要推断，也不需要任何标定。
+ * power_now 是内核直接算好的功率，符号就是方向：负值电池在放电，正值在充电。
+ * 不需要推断，不需要标定，也没有机型差异。
  *
- * 这个依据能覆盖几个容易搞错的场景：
+ * ## 为什么之前没生效
  *
- * 插着充电器打游戏、功耗超过充电器输出时，电池在倒贴。内核的 status 节点
- * 这时候仍然报 Charging（充电器确实接着），靠状态判断会误认为是充电；
- * 但 current_now 会变成负值，符号直接说明了真相。
- *
- * 没接充电器时电池只可能放电，这条也是硬事实，作为兜底。
- *
- * ## 为什么不看 status
- *
- * status 反映的是「充电器与电池之间的连接关系」，不是「电池净能量流向」。
- * 供电不足、涓流、电源路径切换这些阶段它都会给出误导性的值。只有电流
- * 不可信（读不到、或者数值太小）时才退回用它。
+ * 读 power_now 的那个槽位构造时没传 keepSign，parseScaledSigned 会把符号丢掉，
+ * 于是所有功率都是正数，方向判定完全失效。这一个参数就是全部原因。
  */
 public final class PowerDirection {
 
     private static final String TAG = "PowerDirection";
 
-    /**
-     * 判定的输入。
-     */
-    public static final class Input {
-        /** 电池电流（A），带内核给出的符号：正进负出 */
-        public float currentA;
-        /** status 节点原文，读不到是 null */
-        public String status;
-        /** EXTRA_PLUGGED 原值：0 = 没接电源，非 0 = 接了 */
-        public int plugged;
-        /** 系统报的充电状态（BatteryManager.BATTERY_STATUS_*） */
-        public int sysStatus = BatteryManager.BATTERY_STATUS_UNKNOWN;
-    }
-
     /** 判定结果 */
     public static final class Result {
         /** 是否在放电（电池向负载供电） */
         public boolean discharging;
-        /** 带符号的功率（W）：正进负出 */
+        /** 带符号的功率（W）：负值放电、正值充电 */
         public float powerW;
-        /** 带符号的电流（A）：正进负出 */
-        public float currentA;
     }
 
     private PowerDirection() {
     }
 
     /**
-     * 全量判定：方向 + 带符号的功率/电流。
+     * 用 power_now 的实测值判定方向。
      *
-     * absPowerW 传正的功率绝对值（电流×电压 或 power_now），
-     * 方法内部按判定出的方向补上符号。
+     * signedPowerW 是 power_now 读出来的带符号功率。负值即放电。
+     * 读不到（0）时退回「系统是否接着电源」这个粗判据。
      */
-    public static Result resolve(Context context, Input in, float absPowerW) {
+    public static Result resolve(Context context, float signedPowerW) {
         Result r = new Result();
-        r.discharging = isDischarging(context, in);
 
-        float absA = Math.abs(in.currentA);
-        r.currentA = r.discharging ? -absA : absA;
+        if (signedPowerW != 0f) {
+            // 内核给了数，符号就是答案，不需要任何推断
+            r.powerW = signedPowerW;
+            r.discharging = signedPowerW < 0f;
+            return r;
+        }
 
-        float p = Math.abs(absPowerW);
-        r.powerW = r.discharging ? -p : p;
+        // ---- power_now 读不到：按有没有接电源兜底 ----
+        //
+        // 没接电源必定放电；接了电源又没有功率读数，只能当作在充电。
+        // 这个分支只在极少数机型上会走到
+        r.discharging = !isPlugged(context);
+        r.powerW = 0f;
         return r;
     }
 
-    /**
-     * 是不是在放电。
-     */
-    public static boolean isDischarging(Context context, Input in) {
-        // ---- 1. 没接外接电源 → 必定放电 ----
-        //
-        // 不需要判断，没有电源输入时电池只可能出电
-        if (in.plugged <= 0) {
-            return true;
-        }
-
-        // ---- 2. 电流符号 ----
-        //
-        // 这是主判据。内核报告的电流方向是实测值，比 status 可靠：
-        // 插着充电器打游戏、功耗超过充电器输出时，status 还报 Charging，
-        // 但 current_now 已经变成负数了
-        if (Math.abs(in.currentA) >= Constants.Battery.CURRENT_CREDIBLE_A) {
-            return in.currentA < 0f;
-        }
-
-        // ---- 3. 电流太小或读不到，退回 status ----
-        if (in.status != null) {
-            if (Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
-                return true;
-            }
-            if (Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
-                    || Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status)) {
-                return false;
-            }
-        }
-
-        // ---- 4. 兜底：按系统报的充电状态 ----
-        return in.sysStatus != BatteryManager.BATTERY_STATUS_CHARGING
-                && in.sysStatus != BatteryManager.BATTERY_STATUS_FULL;
-    }
-
-    /**
-     * 从系统广播取当前电源状态的快照。
-     *
-     * 用 registerReceiver(null, ...) 拿立即返回的 sticky 广播：不需要真的注册
-     * 接收者，也不会漏掉状态。plugged 和 status 一次都拿到。
-     */
-    public static Input readInputFromBattery(Context context) {
-        Input in = new Input();
+    /** 当前有没有接外接电源 */
+    private static boolean isPlugged(Context context) {
         if (context == null) {
-            return in;
+            return false;
         }
         try {
             Intent intent = context.registerReceiver(
                     null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
             if (intent != null) {
-                in.plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-                in.sysStatus = intent.getIntExtra(BatteryManager.EXTRA_STATUS,
-                        BatteryManager.BATTERY_STATUS_UNKNOWN);
+                return intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
             }
         } catch (Throwable t) {
-            LogUtils.w(TAG + " read battery intent failed", t);
+            LogUtils.w(TAG + " read plugged failed", t);
         }
-        return in;
+        return false;
     }
 }

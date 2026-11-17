@@ -68,7 +68,7 @@ public final class PowerDirection {
      * 读到版本号不是 2 的存储值就整条丢掉，回落到默认约定重新学。
      */
     private static final String PREF_SIGN_VERSION = "battery_discharge_sign_version";
-    private static final int SIGN_VERSION = 2;
+    private static final int SIGN_VERSION = 3;
 
     /**
      * 判定的输入。
@@ -144,22 +144,21 @@ public final class PowerDirection {
 
         // ---- 3. status 说充电 / 已满 ----
         //
-        // 内核说充电就信它——这是充电器与电池管理芯片共同得出的结论，
-        // 比用电流符号去猜可靠得多。原来的顺序让电流压过 status，而符号约定
-        // 在没标定过时只是个默认值，一旦机型是「正=放电」就会把正常充电判成
-        // 放电，这就是「充电时功耗完全相反」的原因。
+        // 内核说充电，正常情况下信它。但要认出一种例外：插着充电器打游戏、
+        // 功耗超过充电器输出时，电池在倒贴放电，内核仍报 Charging
+        // （因为充电器确实接着）。
         //
-        // 唯一的例外是供电不足：插着 USB 打游戏、功耗超过充电器输出时，
-        // 内核仍报 Charging，但电池其实在放电。这个场景要认出来（1.8.13 修的
-        // 就是它）。但它只在符号约定**已经确认过**时才敢用——没确认过就不知道
-        // 电流哪边是出，拿默认值去推翻内核结论，又把正常充电判反了
+        // 判法是看电流方向是否符合「进电」。这需要知道符号约定。
+        // 约定没确认过时不敢用——那时候「哪边是进电」是猜的，
+        // 拿猜的去推翻内核结论就会把正常充电判反（1.9.6 的教训）。
         if (in.status != null
                 && (Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
                     || Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status))) {
             if (currentTrustworthy && dischargeSignKnown(context)) {
                 int sign = dischargeSign(context);
-                boolean outward = sign > 0 ? in.currentA > 0f : in.currentA < 0f;
-                return outward;
+                // 进电方向 = -sign；电流符号等于进电方向 → 在充电
+                boolean currentInward = sign > 0 ? in.currentA < 0f : in.currentA > 0f;
+                return !currentInward;
             }
             return false;
         }
@@ -179,44 +178,69 @@ public final class PowerDirection {
     }
 
     /**
+     * 「连续一致」的拍数要求。
+     *
+     * 电源路径切换、涓流、充满时，内核的 status 会短暂报 Discharging，
+     * 电流却还在进电。这类噪声样本只有一两拍。要求连续 N 拍方向一致，
+     * 就能把它们滤掉，同时不误伤真实放电（真实放电会持续很久）。
+     */
+    private static final int SIGN_CONFIRM_TICKS = 3;
+
+    /** 上一拍观察到的放电符号，以及连续一致的拍数 */
+    private static int pendingSign;
+    private static int pendingCount;
+
+    /**
      * 校正「放电时电流是正是负」。
      *
-     * 采信条件收得很紧，因为标错了代价很大：约定是持久化的，一旦写成反的，
-     * 之后每一次充电都会按反的方向算，直到再遇到一个能纠回来的样本。
+     * 样本是「status 明确报 Discharging」——内核自己说在放电，这个判断不依赖
+     * 符号约定，所以样本本身是可信的。电流的符号就是放电方向。
      *
-     * 三个条件同时成立才采信：
+     * 两个防污染措施：
      *
-     * 一、**必须没接外接电源**。这是最关键的约束。接了电源时内核的 status 会
-     *     在电源路径切换、涓流、充满这些阶段短暂报 Discharging，而电流其实还在
-     *     进电。拿这种样本标定，就会把「进电方向」误当成「放电方向」，
-     *     约定直接写反——1.9.5 的充电符号反向就是这么来的。
-     *     没接电源时不存在歧义：电池只可能放电，status 报 Discharging 是真的。
+     * 一是要求连续 N 拍观察到同一个符号。电源路径切换时内核会短暂误报
+     * Discharging，那种噪声样本方向不固定、持续也短，连续三拍一致的要求
+     * 能滤掉绝大部分。
      *
-     * 二、status 明确报 Discharging。
+     * 二是不接电源时门槛更低（静置噪声小，方向确定）；接电源时要求电流更大，
+     * 因为那种场景下小电流样本更可能是噪声。
      *
-     * 三、电流绝对值够大。没接电源时用 LOW 门槛就够——静置时没有充电电流干扰，
-     *     噪声小、方向确定。这也解决了老版本「不打游戏就永远学不到」的问题。
+     * 这样既能在「没接电源」时快速学到约定，也能在「接电源但电池在倒贴」
+     * 时学到——后者正是之前学不到、导致倒贴检测失效的原因。
      */
     private static void calibrate(Context context, Input in) {
-        // 条件一：必须没接电源。接电源时的 Discharging 样本一律不采信
-        if (in.plugged > 0) {
-            return;
-        }
-        // 条件二：status 明确说在放电
+        // 只采信内核明确说在放电的样本
         if (in.status == null
                 || !Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
+            pendingCount = 0;
             return;
         }
-        // 条件三：电流够大，符号才有意义
-        if (Math.abs(in.currentA) < Constants.Battery.CURRENT_CREDIBLE_A) {
+        // 接电源时要更大的电流才算真放电（倒贴的电流通常不小）
+        float threshold = in.plugged > 0
+                ? Constants.Battery.DISCHARGE_HINT_A
+                : Constants.Battery.CURRENT_CREDIBLE_A;
+        if (Math.abs(in.currentA) < threshold) {
+            pendingCount = 0;
             return;
         }
+
         int observed = in.currentA > 0f ? 1 : -1;
-        int stored = dischargeSign(context);
-        if (observed != stored) {
-            writeDischargeSign(context, observed);
-            LogUtils.i(TAG + " discharge sign corrected: " + stored + " -> " + observed);
+        if (observed == pendingSign) {
+            pendingCount++;
+        } else {
+            pendingSign = observed;
+            pendingCount = 1;
         }
+        if (pendingCount < SIGN_CONFIRM_TICKS) {
+            return;
+        }
+        // 连续确认够了，采信
+        int stored = dischargeSign(context);
+        if (observed != stored || !dischargeSignKnown(context)) {
+            writeDischargeSign(context, observed);
+            LogUtils.i(TAG + " discharge sign confirmed: " + observed);
+        }
+        pendingCount = 0;
     }
 
     /**

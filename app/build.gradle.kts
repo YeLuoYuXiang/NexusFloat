@@ -26,8 +26,8 @@ android {
         applicationId = "com.jj.nexusfloat"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1091100
-        versionName = "1.9.11"
+        versionCode = 1091200
+        versionName = "1.9.12"
     }
 
     signingConfigs {

@@ -279,15 +279,16 @@ public class PerformanceCollector {
             return false;
         }
         try {
-            // 走统一的方向判定（v1.9.11）：看 power_now 的符号。
+            // 走统一的方向判定（v1.9.12）：看电流符号。
             //
             // 和监视条上的功率显示共用同一处实现，所以「功率显示负值」和
             // 「监视条还在显示」这种自相矛盾的状态不会出现
-            float signedPower = SysfsReader.direct().readBatteryPowerW();
-            if (signedPower == 0f) {
-                signedPower = SysfsReader.root().readBatteryPowerW();
+            float signedCurrent = SysfsReader.direct().readBatteryCurrentA();
+            if (signedCurrent == 0f) {
+                signedCurrent = SysfsReader.root().readBatteryCurrentA();
             }
-            return !PowerDirection.resolve(context, signedPower).discharging;
+            float voltage = SysfsReader.direct().readBatteryVoltageV();
+            return !PowerDirection.resolve(signedCurrent, voltage, 1f).discharging;
         } catch (Throwable t) {
             LogUtils.w("isChargingNow failed", t);
             return false;
@@ -589,38 +590,32 @@ public class PerformanceCollector {
         data.cpuTemp = CpuTempReader.readCpuTempC();
 
         boolean dualCell = NexusBridge.isDualCellEnabled();
+        float dualFactor = dualCell ? Constants.Modules.DUAL_CELL_MULTIPLIER : 1f;
 
-        // 功率只读 power_now，符号就是方向（v1.9.11）。
+        // 电流带符号读出来：负值放电、正值充电（v1.9.12）。
         //
-        // 之前是「电流 × 电压 优先、power_now 兜底」，两条都取绝对值，
-        // 方向另外靠推断。推断走过 status 节点、电流符号、电量趋势，都不成立：
-        // 那些都不是「电池净功率」的直接测量。
-        //
-        // power_now 的符号本身就是答案，负值放电、正值充电。读它必须带符号，
-        // 否则等于把方向信息扔掉（之前一直失败的根因就是槽位漏了 keepSign）
-        float signedPower = powerTracker.resolve(
-                SysfsReader.direct().readBatteryPowerW());
-        if (signedPower == 0f) {
-            // 直读不到再试 root
-            signedPower = powerTracker.resolve(SysfsReader.root().readBatteryPowerW());
-        }
+        // 方向就靠这一位符号。之前试过 power_now（部分机型没实现，读出来是 0）、
+        // status 节点（只反映充电器接着没有）、电量趋势（太慢），都不成立。
+        // 只有电流是内核普遍实现、且自带方向的实测值
+        float signedCurrent = readBatteryCurrentA();
+        float voltageV = readBatteryVoltageV();
 
-        // 双电芯并联时功率翻倍。倍率作用在带符号的值上，符号不变
-        if (dualCell && signedPower != 0f) {
-            signedPower *= Constants.Modules.DUAL_CELL_MULTIPLIER;
-        }
+        // 功率 = 电流 × 电压，符号跟电流走
+        float signedPower = powerTracker.resolve(signedCurrent * dualFactor, voltageV);
 
-        PowerDirection.Result dir = PowerDirection.resolve(context, signedPower);
+        PowerDirection.Result dir = PowerDirection.resolve(
+                signedCurrent, voltageV, dualFactor);
         data.isCharging = !dir.discharging;
-        data.batteryPowerW = dir.powerW;
+        if (signedPower != 0f) {
+            data.batteryPowerW = signedPower;
+        } else {
+            // 状态机没给出值时用方向判定的结果兜底
+            data.batteryPowerW = dir.powerW;
+        }
 
-        // 电流仍按原路径读，符号跟随功率方向，保证两列一致
-        float currentA = readBatteryCurrentA();
-        if (Math.abs(currentA) > 0f) {
-            float ma = Math.abs(currentA) * 1000f;
-            if (dualCell) {
-                ma *= Constants.Modules.DUAL_CELL_MULTIPLIER;
-            }
+        // 电流列同样按方向给符号，保证两列一致
+        if (Math.abs(signedCurrent) > 0f) {
+            float ma = Math.abs(signedCurrent) * 1000f * dualFactor;
             data.batteryCurrentMa = dir.discharging ? -ma : ma;
         }
     }

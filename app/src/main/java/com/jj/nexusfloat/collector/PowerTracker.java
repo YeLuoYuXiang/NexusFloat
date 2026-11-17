@@ -5,20 +5,17 @@ import com.jj.nexusfloat.constant.Constants;
 /**
  * 功率读取与突变守卫。
  *
- * v1.9.11 起只读内核的 power_now，并且保留它的符号。
+ * ## 为什么改回电流
  *
- * 之前的实现是「电流 × 电压 优先，power_now 兜底」，两步都取绝对值，
- * 方向另外靠推断。推断这条路走过 status 节点、电流符号、电量趋势，都不对，
- * 因为那些都不是「电池净功率」的直接测量。
+ * 上一版只读 power_now，结果在用户机器上读出来是 0，整个功率显示消失。
+ * power_now 是 power_supply ABI 里的可选属性，不少机型压根没实现。
+ * current_now 是普遍实现的，配合 voltage_now 就能算出功率。
  *
- * power_now 是内核直接算好的功率，符号就是方向。唯一要做的是别把符号弄丢——
- * 这也是之前一直失败的原因：读它的槽位构造时漏了 keepSign。
+ * ## 符号怎么处理
  *
- * ## 突变守卫
- *
- * 保留原有逻辑，但改成按绝对值判断、按原符号返回。功率从 +8W 跳到 -8W
- * 说明电池从充电切到放电，这是真实的方向变化，不该被当成尖峰拦掉——
- * 所以只要符号变了就直接放行。
+ * 电流带符号传入（负放电、正充电），本类只对**绝对值**做区间校验和突变守卫，
+ * 判定通过后按**原始符号**返回。这样负功率不会被误当成「读不到」，
+ * 方向信息也不会在任何一步被抹掉。
  */
 public final class PowerTracker {
 
@@ -32,34 +29,31 @@ public final class PowerTracker {
     private boolean lastFresh;
 
     /**
-     * 采一功率。
+     * 采一次功率。
      *
-     * signedPowerW 是 power_now 的带符号读数，0 表示读不到。
-     * 返回带符号的功率，读不到时沿用旧值，再不行返回 0。
+     * signedCurrentA 是带符号的电流（A），voltageV 是电压。
+     * 返回带符号功率：负值放电、正值充电。读不到时沿用旧值。
      */
-    public float resolve(float signedPowerW) {
-        if (signedPowerW != 0f) {
-            float abs = Math.abs(signedPowerW);
-            boolean sane = abs >= Constants.Battery.POWER_MIN_W
-                    && abs <= Constants.Battery.POWER_MAX_W;
-            if (sane) {
-                // 符号变了说明充放电方向切换，这是真实变化，直接放行
-                boolean signFlip = lastValid != 0f
-                        && (lastValid > 0f) != (signedPowerW > 0f);
-                if (signFlip || !isSpike(abs)) {
-                    spikeTicks = 0;
-                } else if (++spikeTicks < Constants.Battery.POWER_SPIKE_CONFIRM_TICKS) {
-                    // 疑似尖峰还没确认，先沿用旧值
-                    lastFresh = false;
-                    return lastValid;
-                } else {
-                    spikeTicks = 0;
-                }
-                lastValid = signedPowerW;
-                staleTicks = 0;
-                lastFresh = true;
-                return signedPowerW;
+    public float resolve(float signedCurrentA, float voltageV) {
+        float signedPower = calcPower(signedCurrentA, voltageV);
+
+        if (signedPower != 0f) {
+            float abs = Math.abs(signedPower);
+            // 符号翻转说明充放电方向切换，是真实变化，直接放行
+            boolean signFlip = lastValid != 0f
+                    && (lastValid > 0f) != (signedPower > 0f);
+            if (signFlip || !isSpike(abs)) {
+                spikeTicks = 0;
+            } else if (++spikeTicks < Constants.Battery.POWER_SPIKE_CONFIRM_TICKS) {
+                lastFresh = false;
+                return lastValid;
+            } else {
+                spikeTicks = 0;
             }
+            lastValid = signedPower;
+            staleTicks = 0;
+            lastFresh = true;
+            return signedPower;
         }
 
         // 读不到：沿用旧值几拍，之后归零
@@ -74,6 +68,22 @@ public final class PowerTracker {
     }
 
     /**
+     * 电流 × 电压，符号跟着电流。
+     *
+     * 不做 Math.abs——负电流必须算出负功率，否则方向信息在这一步就没了
+     */
+    private static float calcPower(float signedCurrentA, float voltageV) {
+        if (signedCurrentA == 0f || voltageV <= 0f) {
+            return 0f;
+        }
+        float power = signedCurrentA * voltageV;
+        float abs = Math.abs(power);
+        boolean sane = abs >= Constants.Battery.POWER_MIN_W
+                && abs <= Constants.Battery.POWER_MAX_W;
+        return sane ? power : 0f;
+    }
+
+    /**
      * 上一次 resolve 返回的是不是本拍新读到的值。
      *
      * 必须在每次 resolve 之后立刻读，它反映的是「最近一次调用」的结果。
@@ -83,10 +93,7 @@ public final class PowerTracker {
     }
 
     /**
-     * 是不是疑似尖峰。
-     *
-     * 按绝对值比较：上次已有有效值、新值超过其若干倍、且绝对增量够大。
-     * 两条都满足才算，避免小功率区间（0.1W→0.9W）被误伤。
+     * 是不是疑似尖峰。按绝对值比较，不影响符号。
      */
     private boolean isSpike(float absPower) {
         if (lastValid == 0f) {

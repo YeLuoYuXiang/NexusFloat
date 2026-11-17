@@ -2869,6 +2869,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.12",
+        "功率改回由电流乘电压算出。上一版只读 power_now，而该节点在部分机型上并未" +
+                "实现，读出来是 0，功率显示因此变成空白。方向判定只用内核电流的符号：" +
+                "负值放电、正值充电。整条链路上不做任何取绝对值，符号从内核节点一路" +
+                "原样传递到显示，中间不会被抹掉。用状态节点、电量趋势判断方向的做法" +
+                "均已移除。"
+    ),
+    ChangelogEntry(
         "1.9.11",
         "功率读数全部改为直接读内核的 power_now 节点，符号即方向：负值放电、正值充电。" +
                 "修复了读 power_now 时符号被丢掉的问题——之前那个槽位构造漏了一个保留" +

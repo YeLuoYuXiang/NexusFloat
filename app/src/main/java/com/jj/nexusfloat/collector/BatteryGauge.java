@@ -49,21 +49,17 @@ public final class BatteryGauge {
     public Result sample() {
         Result r = new Result();
 
-        // 与监视条一致：只读 power_now 的带符号值（v1.9.11）
-        float signedPower = powerTracker.resolve(
-                SysfsReader.direct().readBatteryPowerW());
-        if (signedPower == 0f) {
-            signedPower = powerTracker.resolve(SysfsReader.root().readBatteryPowerW());
-        }
+        // 与监视条一致：电流 × 电压，符号跟电流（v1.9.12）
+        float signedCurrent = readCurrentA();
+        float voltageV = readVoltageV();
 
-        PowerDirection.Result dir = PowerDirection.resolve(context, signedPower);
+        float signedPower = powerTracker.resolve(signedCurrent, voltageV);
+        PowerDirection.Result dir = PowerDirection.resolve(signedCurrent, voltageV, 1f);
+
         r.discharging = dir.discharging;
-        r.powerW = dir.powerW;
-
-        float currentA = readCurrentA();
-        float absA = Math.abs(currentA);
-        r.currentA = dir.discharging ? -absA : absA;
-        r.voltageV = readVoltageV();
+        r.powerW = signedPower != 0f ? signedPower : dir.powerW;
+        r.currentA = dir.currentA;
+        r.voltageV = voltageV;
         return r;
     }
 

@@ -2869,6 +2869,14 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.13",
+        "修正功率与电流的符号方向。部分机型的 current_now 采用「正值表示放电」的" +
+                "约定，与 Linux power_supply 规定的「负值表示放电」相反，导致三种状态" +
+                "（不充电、充电、插电超载）的符号全部反向。现在在读取电流后统一归一化" +
+                "成标准语义，之后的判定与功率计算都基于归一化后的值，只有一处做翻转，" +
+                "不会出现某处翻了某处没翻。"
+    ),
+    ChangelogEntry(
         "1.9.12",
         "功率改回由电流乘电压算出。上一版只读 power_now，而该节点在部分机型上并未" +
                 "实现，读出来是 0，功率显示因此变成空白。方向判定只用内核电流的符号：" +

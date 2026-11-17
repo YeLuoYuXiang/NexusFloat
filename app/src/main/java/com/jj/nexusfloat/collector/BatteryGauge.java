@@ -49,12 +49,12 @@ public final class BatteryGauge {
     public Result sample() {
         Result r = new Result();
 
-        // 与监视条一致：电流 × 电压，符号跟电流（v1.9.12）
-        float signedCurrent = readCurrentA();
+        // 与监视条一致：先归一化电流，再算功率（v1.9.13）
+        float current = PowerDirection.normalizeCurrent(readCurrentA());
         float voltageV = readVoltageV();
 
-        float signedPower = powerTracker.resolve(signedCurrent, voltageV);
-        PowerDirection.Result dir = PowerDirection.resolve(signedCurrent, voltageV, 1f);
+        float signedPower = powerTracker.resolve(current, voltageV);
+        PowerDirection.Result dir = PowerDirection.resolve(current, voltageV, 1f);
 
         r.discharging = dir.discharging;
         r.powerW = signedPower != 0f ? signedPower : dir.powerW;

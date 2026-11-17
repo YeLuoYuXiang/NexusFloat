@@ -12,6 +12,7 @@ import android.os.HandlerThread;
 import android.os.PowerManager;
 import android.os.SystemClock;
 
+import com.jj.nexusfloat.collector.PowerDirection;
 import com.jj.nexusfloat.collector.PowerTracker;
 import com.jj.nexusfloat.collector.SysfsReader;
 import com.jj.nexusfloat.constant.Constants;
@@ -431,15 +432,20 @@ public final class BatterySampler {
         // 跟监视条（collector.PerformanceCollector#collectBatteryData）走同一套：
         // 电流 × 电压 得功率，取数失败再退回 power_now，并过一遍 PowerTracker
         // 的突变守卫。两边共用同一个类的同一套常量，读数才不会对不上。
-        boolean charging = plugged != 0
-                && s.status != BatteryManager.BATTERY_STATUS_DISCHARGING;
+        // 方向跟监视条走同一套（v1.9.13）：看归一化后的电流符号。
+        //
+        // 原来用「接了充电器 且 系统没报放电」，那个在插电打游戏超载时
+        // 会误判成充电——充电器确实接着，但电池在倒贴
+        float rawCurrentA = readCurrentA(intent);
+        float normalizedCurrentA = PowerDirection.normalizeCurrent(rawCurrentA);
+        boolean charging = normalizedCurrentA >= 0f;
         if (!charging) {
             // 拔电就把沿用计数归零：沿用窗口只服务「这一次充电」，不该跨会话累计。
             // lastValidCurrentA 不在这里清——它会在下一次读到有效值或第一次沿用后
             // 自然被覆盖，清不清对结果没影响，留着反而能桥接插拔瞬间那一拍
             chargeCarryTicks = 0;
         }
-        float currentA = readCurrentA(intent);
+        float currentA = Math.abs(normalizedCurrentA);
         // readCurrentA 四条路全失败时返回的是 0，这个 0 是「读不到」的意思，
         // 不是「电流真的是 0」。必须把两者分开，否则 0 会被原样落库、当成测量值。
         boolean currentFresh = currentA > 0f;
@@ -464,8 +470,7 @@ public final class BatterySampler {
         float magnitudeMa = effCurrentA * 1000f;
         s.currentMa = Math.round(charging ? magnitudeMa : -magnitudeMa);
 
-        // 功率 = 电流 × 电压，符号跟电流（v1.9.12）。
-        // effCurrentA 是绝对值，charging 标志决定符号
+        // 功率 = 电流 × 电压，符号跟归一化后的电流（v1.9.13）
         float signedPowerW = powerTracker.resolve(
                 charging ? effCurrentA : -effCurrentA, voltageV);
         s.powerW = signedPowerW;

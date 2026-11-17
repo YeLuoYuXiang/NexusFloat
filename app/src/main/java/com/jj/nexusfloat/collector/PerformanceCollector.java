@@ -283,12 +283,13 @@ public class PerformanceCollector {
             //
             // 和监视条上的功率显示共用同一处实现，所以「功率显示负值」和
             // 「监视条还在显示」这种自相矛盾的状态不会出现
-            float signedCurrent = SysfsReader.direct().readBatteryCurrentA();
-            if (signedCurrent == 0f) {
-                signedCurrent = SysfsReader.root().readBatteryCurrentA();
+            float rawCurrent = SysfsReader.direct().readBatteryCurrentA();
+            if (rawCurrent == 0f) {
+                rawCurrent = SysfsReader.root().readBatteryCurrentA();
             }
+            float current = PowerDirection.normalizeCurrent(rawCurrent);
             float voltage = SysfsReader.direct().readBatteryVoltageV();
-            return !PowerDirection.resolve(signedCurrent, voltage, 1f).discharging;
+            return !PowerDirection.resolve(current, voltage, 1f).discharging;
         } catch (Throwable t) {
             LogUtils.w("isChargingNow failed", t);
             return false;
@@ -597,14 +598,14 @@ public class PerformanceCollector {
         // 方向就靠这一位符号。之前试过 power_now（部分机型没实现，读出来是 0）、
         // status 节点（只反映充电器接着没有）、电量趋势（太慢），都不成立。
         // 只有电流是内核普遍实现、且自带方向的实测值
-        float signedCurrent = readBatteryCurrentA();
+        // 读出来先归一化成标准语义（负=放电），之后全部用归一化后的值
+        float current = PowerDirection.normalizeCurrent(readBatteryCurrentA());
         float voltageV = readBatteryVoltageV();
 
-        // 功率 = 电流 × 电压，符号跟电流走
-        float signedPower = powerTracker.resolve(signedCurrent * dualFactor, voltageV);
+        // 功率 = 电流 × 电压，符号跟归一化后的电流走
+        float signedPower = powerTracker.resolve(current * dualFactor, voltageV);
 
-        PowerDirection.Result dir = PowerDirection.resolve(
-                signedCurrent, voltageV, dualFactor);
+        PowerDirection.Result dir = PowerDirection.resolve(current, voltageV, dualFactor);
         data.isCharging = !dir.discharging;
         if (signedPower != 0f) {
             data.batteryPowerW = signedPower;
@@ -614,8 +615,8 @@ public class PerformanceCollector {
         }
 
         // 电流列同样按方向给符号，保证两列一致
-        if (Math.abs(signedCurrent) > 0f) {
-            float ma = Math.abs(signedCurrent) * 1000f * dualFactor;
+        if (Math.abs(current) > 0f) {
+            float ma = Math.abs(current) * 1000f * dualFactor;
             data.batteryCurrentMa = dir.discharging ? -ma : ma;
         }
     }

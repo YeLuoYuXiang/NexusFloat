@@ -124,60 +124,58 @@ public final class PowerDirection {
      * 是不是在放电。判定顺序见类注释。
      */
     public static boolean isDischarging(Context context, Input in) {
-        // 持续校正符号约定：有可信样本就复核，不一致立刻纠正
         calibrate(context, in);
 
-        int sign = dischargeSign(context);
-        boolean currentOutward = sign > 0 ? in.currentA > 0f : in.currentA < 0f;
         float absA = Math.abs(in.currentA);
         boolean currentTrustworthy = absA >= Constants.Battery.CURRENT_CREDIBLE_A;
 
-        // ---- 第一级：物理约束 ----
+        // ---- 1. 没接任何外接电源 → 必定放电 ----
         //
-        // 没接任何外接电源时，电池不可能被充电。这一条不依赖驱动报告，
-        // 是硬事实。它能兜住所有「驱动乱报 Charging」的机型，
-        // 也是"没插线时符号反"这类问题的根本解
+        // 硬件事实，不需要任何推断。电池在没接电源时不可能被充电
         if (in.plugged <= 0) {
             return true;
         }
 
-        // ---- 第二级：status 节点明确说放电 ----
+        // ---- 2. status 明确说放电 → 放电 ----
         if (in.status != null
                 && Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
             return true;
         }
 
-        // ---- 第三级：接了电源但电流朝外，说明供电跟不上，电池在倒贴 ----
+        // ---- 3. status 说充电 / 已满 ----
         //
-        // 这一条要压过 status 说的 Charging：插着 USB 打游戏、功耗超过供电时，
-        // 内核仍报 Charging，但电池确实在放电。
+        // 内核说充电就信它——这是充电器与电池管理芯片共同得出的结论，
+        // 比用电流符号去猜可靠得多。原来的顺序让电流压过 status，而符号约定
+        // 在没标定过时只是个默认值，一旦机型是「正=放电」就会把正常充电判成
+        // 放电，这就是「充电时功耗完全相反」的原因。
         //
-        // 明确写出 in.plugged > 0 这个前置条件：这条判据存在的意义就是处理
-        // 「接了电源却还在放电」，没接电源的情况第一级已经返回了。加上它之后，
-        // 即使符号约定因为某种原因被写反，也不会把正常充电误判成放电——
-        // 那种情况下电流朝内，currentOutward 本来就是 false
-        if (in.plugged > 0 && currentTrustworthy && currentOutward) {
-            return true;
-        }
-
-        // ---- 第四级：status 说在充电/已满，且电流没明显朝外 ----
+        // 唯一的例外是供电不足：插着 USB 打游戏、功耗超过充电器输出时，
+        // 内核仍报 Charging，但电池其实在放电。这个场景要认出来（1.8.13 修的
+        // 就是它）。但它只在符号约定**已经确认过**时才敢用——没确认过就不知道
+        // 电流哪边是出，拿默认值去推翻内核结论，又把正常充电判反了
         if (in.status != null
                 && (Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(in.status)
                     || Constants.Battery.STATUS_FULL.equalsIgnoreCase(in.status))) {
+            if (currentTrustworthy && dischargeSignKnown(context)) {
+                int sign = dischargeSign(context);
+                boolean outward = sign > 0 ? in.currentA > 0f : in.currentA < 0f;
+                return outward;
+            }
             return false;
         }
 
-        // ---- 第五级：电流可信且朝内 → 在充电 ----
-        if (currentTrustworthy && !currentOutward) {
-            return false;
-        }
-
-        // ---- 兜底：接了电源但电流读不到/太小，按系统状态 ----
+        // ---- 4. status 没有结论时，用电流方向 ----
         //
-        // 接了电源、又没证据说在放电，那就当它在充电。这个方向的误判代价更小：
-        // 显示正值总比盯着一个莫名其妙的负值好理解
-        return in.sysStatus != BatteryManager.BATTERY_STATUS_CHARGING
-                && in.sysStatus != BatteryManager.BATTERY_STATUS_FULL;
+        // 只有内核没说清（节点读不到、或者报 Not charging / Unknown）才走到这里。
+        // 此时用符号约定判方向；约定没标定过就按 Android 标准（负为放电）
+        if (currentTrustworthy) {
+            int sign = dischargeSign(context);
+            boolean outward = sign > 0 ? in.currentA > 0f : in.currentA < 0f;
+            return outward;
+        }
+
+        // ---- 5. 兜底：接了电源、又没有放电证据 → 当作在充电 ----
+        return false;
     }
 
     /**
@@ -218,6 +216,27 @@ public final class PowerDirection {
         if (observed != stored) {
             writeDischargeSign(context, observed);
             LogUtils.i(TAG + " discharge sign corrected: " + stored + " -> " + observed);
+        }
+    }
+
+    /**
+     * 符号约定确认过没有。
+     *
+     * 「确认过」指的是真的从一次没接电源的放电样本里学到过，
+     * 而不是还在用默认值。未确认时不能拿电流去推翻内核的状态结论
+     */
+    private static boolean dischargeSignKnown(Context context) {
+        try {
+            SharedPreferences p = prefs(context);
+            if (p == null) {
+                return false;
+            }
+            if (p.getInt(PREF_SIGN_VERSION, 0) != SIGN_VERSION) {
+                return false;
+            }
+            return p.contains(PREF_DISCHARGE_SIGN);
+        } catch (Throwable t) {
+            return false;
         }
     }
 

@@ -2869,6 +2869,13 @@ private data class ChangelogEntry(val version: String, val summary: String)
  */
 private val CHANGELOG = listOf(
     ChangelogEntry(
+        "1.9.5",
+        "修复部分机型上功率、电流符号偶尔反向的问题，插着充电器和没插时都可能出现。" +
+                "判定依据改为优先看外接电源这一硬件事实，不再只依赖驱动报告的状态节点；" +
+                "电流符号的约定改为持续校正并持久化，不再学一次就锁死。监视条与记录页的" +
+                "功率方向判定合并为同一套实现，「仅充电时显示」的判定同步改用这套逻辑。"
+    ),
+    ChangelogEntry(
         "1.9.4",
         "优化监视条运行时的功耗。开启后相比关闭多出的耗电主要来自三处：帧率同步每秒" +
                 "启动一次系统设置进程、设置项每秒重复跨进程读取、GPU 数据每拍两次 root " +

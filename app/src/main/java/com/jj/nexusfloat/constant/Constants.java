@@ -86,7 +86,7 @@ public final class Constants {
          * 只在充电时显示监视条（v1.8.14）。
          *
          * 默认 false。开着之后，只有电池确实在进电时才显示——「在充电」的判定
-         * 用的是和功率方向同一套逻辑（见 PerformanceCollector.isDischarging），
+         * 用的是和功率方向同一套逻辑（见 PowerDirection），
          * 所以插着 USB 但功耗超过供电、电池在掉电时不算充电，监视条照样隐藏。
          */
         public static final String KEY_SHOW_CHARGING_ONLY = "show_charging_only";
@@ -1649,16 +1649,33 @@ public final class Constants {
         public static final String[] STATUS_PATHS = {
                 "/sys/class/power_supply/battery/status",
                 "/sys/class/power_supply/bms/status",
-                "/sys/class/power_supply/usb/status",
                 "/sys/class/power_supply/main/status",
         };
 
-        /** 充电状态节点里表示「正在进电」的取值（不区分大小写比较） */
+        /**
+         * 充电状态节点里表示「正在进电」的取值（不区分大小写比较）
+         *
+         * 注意这里没有 usb/status：它报的是 USB 端口方向，不是电池相对电源的方向。
+         * 插着充电器时它永远说 Charging，哪怕电池在倒贴。混进候选表里会让方向判定
+         * 在 battery/status 读不到时被带偏，这正是「插着线时符号偶尔反」的一个来源。
+         */
         public static final String STATUS_CHARGING = "Charging";
         /** 表示电池已充满、由适配器直接供电 */
         public static final String STATUS_FULL = "Full";
         /** 表示电池正在出电（v1.8.13）。插着 USB 但供电不足时就是它 */
         public static final String STATUS_DISCHARGING = "Discharging";
+
+        /**
+         * 电流多大时符号才可信（A）。
+         *
+         * 用途是给「符号约定校正」和「电流方向判定」做门槛。太小的话静止噪声的
+         * 符号没有意义，会把约定带偏；太大则静置、刷网页这些场景永远采不到样本，
+         * 校正永远不发生——老版本用 0.3A，实测就是这样：不打游戏就学不到。
+         *
+         * 0.05A 与 CURRENT_MIN_A 同级，是「这个读数确实代表一次真实的净流动」的
+         * 下限。低于此值的电流不参与方向判定，但也不推翻已有结论。
+         */
+        public static final float CURRENT_CREDIBLE_A = 0.05f;
 
         /**
          * 电流多大且方向为负时，可以断定电池在放电（A），v1.8.13。
@@ -1670,6 +1687,15 @@ public final class Constants {
          * 0.3A 以上基本可以确定是真实的放电电流。
          */
         public static final float DISCHARGE_HINT_A = 0.3f;
+
+        /**
+         * 「放电时电流是正是负」的默认约定。
+         *
+         * -1 表示负数为放电，符合 Android HAL 与 Linux power_supply ABI 的规定。
+         * 部分 MTK / 三星驱动反着给（正数为放电），运行时靠 PowerDirection 的
+         * 持续校正识别并纠正，不需要用户干预。
+         */
+        public static final int DISCHARGE_SIGN_DEFAULT = -1;
 
         public static final String[] VOLTAGE_PATHS = {
                 "/sys/class/power_supply/battery/voltage_now",

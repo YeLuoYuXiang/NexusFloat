@@ -51,17 +51,30 @@ public final class BatteryGauge {
 
         float currentA = readCurrentA();
         float voltageV = readVoltageV();
-        String status = readStatusText();
 
-        r.discharging = isDischarging(currentA, status);
-        r.currentA = currentA;
-        r.voltageV = voltageV;
+        // 方向判定统一交给 PowerDirection（v1.9.5）。
+        //
+        // 这里原来是自己写的一套：硬编码「负=放电」，没有任何校正。
+        // 而监视条那边有一套带标定的实现，两边对同一组读数可能给出相反结论——
+        // 同一个数在监视条上是 +8W、在记录页是 -8W，用户看着就是「符号反了」。
+        //
+        // 现在全项目只有 PowerDirection 一处实现，两处显示必然一致
+        PowerDirection.Input in = new PowerDirection.Input();
+        in.currentA = currentA;
+        in.status = readStatusText();
+        // 外接电源状态从系统广播取（硬件事实，不依赖 sysfs 权限）
+        PowerDirection.Input battery = PowerDirection.readInputFromBattery(context);
+        in.plugged = battery.plugged;
+        in.sysStatus = battery.sysStatus;
 
         float power = powerTracker.resolve(Math.abs(currentA), voltageV,
                 () -> SysfsReader.direct().readBatteryPowerW());
-        if (power > 0f) {
-            r.powerW = r.discharging ? -power : power;
-        }
+
+        PowerDirection.Result dir = PowerDirection.resolve(context, in, power);
+        r.discharging = dir.discharging;
+        r.currentA = dir.currentA;
+        r.powerW = dir.powerW;
+        r.voltageV = voltageV;
         return r;
     }
 
@@ -137,19 +150,4 @@ public final class BatteryGauge {
      * status 明确报 Discharging 直接采信；报 Charging 时再看电流——电流明显朝外流
      * 说明供电跟不上、电池在补差额，这时候仍算放电。
      */
-    private boolean isDischarging(float currentA, String status) {
-        if (status != null) {
-            if (Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(status)) {
-                return true;
-            }
-            boolean claimsCharging =
-                    Constants.Battery.STATUS_CHARGING.equalsIgnoreCase(status)
-                            || Constants.Battery.STATUS_FULL.equalsIgnoreCase(status);
-            if (claimsCharging) {
-                // 内核说在充电，但电流明显朝外：电池在倒贴
-                return currentA < -Constants.Battery.DISCHARGE_HINT_A;
-            }
-        }
-        return currentA < 0f;
-    }
 }

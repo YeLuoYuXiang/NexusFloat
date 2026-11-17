@@ -59,6 +59,18 @@ public final class PowerDirection {
     private static final String PREF_NAME = "battery_direction";
 
     /**
+     * 符号约定的版本号。
+     *
+     * 采信规则一变就要加一：老版本按旧规则写下的值可能是错的，必须丢弃重学。
+     *
+     * 2 = 1.9.6 起。1.9.5 的 calibrate 会在充电时采信电源路径切换的噪声样本，
+     * 把约定写反并持久化——这是「充电时符号反」的直接原因。升到 2 之后，
+     * 读到版本号不是 2 的存储值就整条丢掉，回落到默认约定重新学。
+     */
+    private static final String PREF_SIGN_VERSION = "battery_discharge_sign_version";
+    private static final int SIGN_VERSION = 2;
+
+    /**
      * 判定的输入。
      *
      * plugged 来自 EXTRA_PLUGGED，是硬件事实：>=0 表示接了外接电源。
@@ -135,11 +147,16 @@ public final class PowerDirection {
             return true;
         }
 
-        // ---- 第三级：电流明显朝外，说明供电跟不上，电池在倒贴 ----
+        // ---- 第三级：接了电源但电流朝外，说明供电跟不上，电池在倒贴 ----
         //
         // 这一条要压过 status 说的 Charging：插着 USB 打游戏、功耗超过供电时，
-        // 内核仍报 Charging，但电池确实在放电
-        if (currentTrustworthy && currentOutward) {
+        // 内核仍报 Charging，但电池确实在放电。
+        //
+        // 明确写出 in.plugged > 0 这个前置条件：这条判据存在的意义就是处理
+        // 「接了电源却还在放电」，没接电源的情况第一级已经返回了。加上它之后，
+        // 即使符号约定因为某种原因被写反，也不会把正常充电误判成放电——
+        // 那种情况下电流朝内，currentOutward 本来就是 false
+        if (in.plugged > 0 && currentTrustworthy && currentOutward) {
             return true;
         }
 
@@ -164,19 +181,35 @@ public final class PowerDirection {
     }
 
     /**
-     * 持续校正「放电时电流是正是负」。
+     * 校正「放电时电流是正是负」。
      *
-     * 只在 status 明确报 Discharging、且电流大到可信时采信——这时电池确定在放电，
-     * 电流符号就是答案。
+     * 采信条件收得很紧，因为标错了代价很大：约定是持久化的，一旦写成反的，
+     * 之后每一次充电都会按反的方向算，直到再遇到一个能纠回来的样本。
      *
-     * 和老实现的关键差别：不锁死。每次遇到可信样本都复核一遍，不一致就改。
-     * 电源路径切换、节点回落都可能让约定变，锁死会错到底。
+     * 三个条件同时成立才采信：
+     *
+     * 一、**必须没接外接电源**。这是最关键的约束。接了电源时内核的 status 会
+     *     在电源路径切换、涓流、充满这些阶段短暂报 Discharging，而电流其实还在
+     *     进电。拿这种样本标定，就会把「进电方向」误当成「放电方向」，
+     *     约定直接写反——1.9.5 的充电符号反向就是这么来的。
+     *     没接电源时不存在歧义：电池只可能放电，status 报 Discharging 是真的。
+     *
+     * 二、status 明确报 Discharging。
+     *
+     * 三、电流绝对值够大。没接电源时用 LOW 门槛就够——静置时没有充电电流干扰，
+     *     噪声小、方向确定。这也解决了老版本「不打游戏就永远学不到」的问题。
      */
     private static void calibrate(Context context, Input in) {
+        // 条件一：必须没接电源。接电源时的 Discharging 样本一律不采信
+        if (in.plugged > 0) {
+            return;
+        }
+        // 条件二：status 明确说在放电
         if (in.status == null
                 || !Constants.Battery.STATUS_DISCHARGING.equalsIgnoreCase(in.status)) {
             return;
         }
+        // 条件三：电流够大，符号才有意义
         if (Math.abs(in.currentA) < Constants.Battery.CURRENT_CREDIBLE_A) {
             return;
         }
@@ -188,11 +221,25 @@ public final class PowerDirection {
         }
     }
 
-    /** 读持久化的放电符号约定；没有记录时按 Android 标准（负为放电） */
+    /**
+     * 读持久化的放电符号约定；没有记录、或记录来自旧版规则时按 Android 标准
+     * （负为放电）。
+     *
+     * 版本号不匹配就丢掉旧值——这是清掉 1.9.5 污染的关键。
+     */
     private static int dischargeSign(Context context) {
         try {
             SharedPreferences p = prefs(context);
             if (p == null) {
+                return Constants.Battery.DISCHARGE_SIGN_DEFAULT;
+            }
+            int version = p.getInt(PREF_SIGN_VERSION, 0);
+            if (version != SIGN_VERSION) {
+                // 旧版规则写下的值不可信，丢掉
+                if (p.contains(PREF_DISCHARGE_SIGN)) {
+                    p.edit().remove(PREF_DISCHARGE_SIGN).apply();
+                    LogUtils.i(TAG + " dropped stale discharge sign, ver " + version);
+                }
                 return Constants.Battery.DISCHARGE_SIGN_DEFAULT;
             }
             return p.getInt(PREF_DISCHARGE_SIGN, Constants.Battery.DISCHARGE_SIGN_DEFAULT);
@@ -207,7 +254,11 @@ public final class PowerDirection {
             if (p == null) {
                 return;
             }
-            p.edit().putInt(PREF_DISCHARGE_SIGN, sign).apply();
+            // 一起写版本号：以后采信规则再改，靠它把这些值作废
+            p.edit()
+                    .putInt(PREF_DISCHARGE_SIGN, sign)
+                    .putInt(PREF_SIGN_VERSION, SIGN_VERSION)
+                    .apply();
         } catch (Throwable t) {
             LogUtils.w(TAG + " write sign failed", t);
         }
